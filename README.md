@@ -1,0 +1,2 @@
+# astrbot_plugin_watch_together
+一个可以和ai观影的插件
