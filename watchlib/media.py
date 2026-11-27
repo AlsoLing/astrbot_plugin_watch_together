@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-__all__ = ["MediaItem", "MediaLibrary", "VIDEO_EXTS", "BROWSER_EXTS", "clean_title"]
+__all__ = ["MediaItem", "MediaLibrary", "VIDEO_EXTS", "BROWSER_EXTS", "clean_title", "find_local_subtitle"]
 
 # 能被浏览器 <video> 直接播放的容器（编码仍需 H.264/H.265 + AAC 等常见组合）
 BROWSER_EXTS = {".mp4", ".m4v", ".webm", ".ogv", ".ogg"}
@@ -137,10 +137,22 @@ class MediaItem:
     plot: str = ""
     year: str = ""
     genre: str = ""
+    # --- 媒体服务器（Jellyfin / Emby）来源的额外信息 ---
+    poster: str = ""
+    source: str = "local"
+    remote_id: str = ""
+    remote_source_id: str = ""
+    remote_stream: str = ""
+    remote_sub_index: int | None = None
+    local_path_ok: bool = True
 
     @property
     def playable_in_browser(self) -> bool:
         return self.ext.lower() in BROWSER_EXTS
+
+    @property
+    def is_remote(self) -> bool:
+        return bool(self.remote_stream) and not self.local_path_ok
 
     def to_public(self) -> dict:
         return {
@@ -148,22 +160,69 @@ class MediaItem:
             "title": self.title,
             "format": self.ext.lstrip(".").upper(),
             "size": self.size,
-            "size_h": human_size(self.size),
+            "size_h": human_size(self.size) if self.size else "",
             "has_sub": bool(self.subtitle),
             "sub_tag": self.subtitle_tag,
             "plot": self.plot[:220],
             "year": self.year,
             "genre": self.genre,
+            "poster": self.poster,
+            "source": self.source,
+            "remote": self.is_remote,
             "folder": Path(self.rel).parent.name if os.sep in self.rel else "",
             "mtime": self.mtime,
             "browser_ok": self.playable_in_browser,
         }
 
     def describe(self) -> str:
-        bits = [self.ext.lstrip(".").upper()]
-        bits.append(human_size(self.size))
+        bits = [self.ext.lstrip(".").upper() or "视频"]
+        if self.size:
+            bits.append(human_size(self.size))
         bits.append("有字幕" if self.subtitle else "无字幕")
+        if self.source != "local":
+            bits.append("媒体服务器")
         return " · ".join(bits)
+
+
+def _pick_subtitle(video: Path, subs: Iterable[Path]) -> tuple[Path | None, str]:
+    stem = video.stem
+    best: tuple[int, int, str, Path] | None = None
+    for sub in subs:
+        sub_stem = sub.stem
+        if sub_stem == stem:
+            tag = ""
+        elif sub_stem.lower().startswith(stem.lower() + "."):
+            tag = sub_stem[len(stem) + 1 :]
+        else:
+            continue
+        score = _lang_score(tag)
+        # 分数相同则优先名字更短的（通常是主字幕）
+        candidate = (score, len(sub.name), tag, sub)
+        if best is None or candidate[:2] < best[:2]:
+            best = candidate
+    if best is None:
+        return None, ""
+    return best[3], best[2]
+
+
+def find_local_subtitle(video: Path) -> tuple[Path | None, str]:
+    """在影片同目录（以及 Subs/ 字幕/ 子目录）里找同名字幕。"""
+
+    candidates: list[Path] = []
+    folder = Path(video).parent
+    try:
+        candidates.extend(p for p in folder.iterdir() if p.suffix.lower() in SUBTITLE_EXTS)
+    except OSError:
+        pass
+    for sub_name in SUB_DIR_NAMES:
+        sub_dir = folder / sub_name
+        if not sub_dir.is_dir():
+            continue
+        try:
+            candidates.extend(p for p in sub_dir.iterdir() if p.suffix.lower() in SUBTITLE_EXTS)
+        except OSError:
+            continue
+    return _pick_subtitle(Path(video), candidates)
 
 
 class MediaLibrary:
@@ -174,8 +233,10 @@ class MediaLibrary:
         dirs_provider: Callable[[], Sequence[str]],
         refresh_seconds: int = 60,
         logger=None,
+        remote_provider: Callable[[], Sequence[MediaItem]] | None = None,
     ) -> None:
         self._dirs_provider = dirs_provider
+        self._remote_provider = remote_provider
         self.refresh_seconds = max(5, int(refresh_seconds or 60))
         self._logger = logger
         self._lock = threading.RLock()
@@ -233,7 +294,7 @@ class MediaLibrary:
                         stat = video.stat()
                     except OSError:
                         continue
-                    subtitle, tag = self._pick_subtitle(video, subs)
+                    subtitle, tag = _pick_subtitle(video, subs)
                     nfo = video.with_suffix(".nfo")
                     info = read_nfo(nfo) if nfo.is_file() else {}
                     rel = str(video.relative_to(root_path))
@@ -254,32 +315,19 @@ class MediaLibrary:
                         genre=info.get("genre", ""),
                     )
 
+        # 合并媒体服务器（Jellyfin / Emby）的片单
+        if self._remote_provider is not None:
+            try:
+                for item in self._remote_provider() or []:
+                    items[item.id] = item
+            except Exception as exc:  # noqa: BLE001 - 远端失败不影响本地片库
+                errors.append(f"媒体服务器：{exc}")
+
         with self._lock:
             self._items = items
             self._errors = errors
             self._roots = roots
             self._scanned_at = time.time()
-
-    @staticmethod
-    def _pick_subtitle(video: Path, subs: Iterable[Path]) -> tuple[Path | None, str]:
-        stem = video.stem
-        best: tuple[int, int, str, Path] | None = None
-        for sub in subs:
-            sub_stem = sub.stem
-            if sub_stem == stem:
-                tag = ""
-            elif sub_stem.lower().startswith(stem.lower() + "."):
-                tag = sub_stem[len(stem) + 1 :]
-            else:
-                continue
-            score = _lang_score(tag)
-            # 分数相同则优先名字更短的（通常是主字幕）
-            candidate = (score, len(sub.name), tag, sub)
-            if best is None or candidate[:2] < best[:2]:
-                best = candidate
-        if best is None:
-            return None, ""
-        return best[3], best[2]
 
     def scan(self, force: bool = False) -> None:
         with self._lock:

@@ -110,5 +110,60 @@
     "type": "string",
     "default": "ffmpeg",
     "hint": "默认从 PATH 里找；也可以填绝对路径，例如 /usr/bin/ffmpeg。Docker 镜像里通常没有 ffmpeg。"
+  },
+  "media_server_type": {
+    "description": "媒体服务器类型",
+    "type": "string",
+    "options": ["off", "jellyfin", "emby"],
+    "labels": ["不启用", "Jellyfin", "Emby"],
+    "default": "off",
+    "hint": "有 Jellyfin / Emby 时可直接读它的片单、海报和简介。绿联影视中心的「媒体服务器」若兼容 Emby 协议，也可选 Emby 试试。"
+  },
+  "media_server_url": {
+    "description": "媒体服务器地址",
+    "type": "string",
+    "default": "",
+    "hint": "例如 http://192.168.1.10:8096（Jellyfin）或 http://192.168.1.10:8097（Emby）。"
+  },
+  "media_server_api_key": {
+    "description": "媒体服务器 API Key",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "Jellyfin：控制台 → API 密钥 → 新建。Emby：设置 → 高级 → API 密钥。"
+  },
+  "media_server_user_id": {
+    "description": "媒体服务器用户 ID（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "留空则自动取第一个用户。"
+  },
+  "media_server_username": {
+    "description": "媒体服务器账号（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "没有 API Key 时，可以用账号密码登录（绿联/Emby 的媒体服务器通常只给账号密码）。"
+  },
+  "media_server_password": {
+    "description": "媒体服务器密码",
+    "type": "string",
+    "default": "",
+    "secret": true
+  },
+  "media_server_path_map": {
+    "description": "路径映射（可选）",
+    "type": "text",
+    "default": "",
+    "hint": "媒体服务器里的路径 → AstrBot 容器里的路径，每行一个，例如 /volume1/影视中心:/media。映射成功才能读字幕、转封装。"
+  },
+  "media_server_refresh": {
+    "description": "媒体服务器刷新间隔（秒）",
+    "type": "int",
+    "default": 300
+  },
+  "media_server_timeout": {
+    "description": "媒体服务器超时（秒）",
+    "type": "int",
+    "default": 8
   }
 }

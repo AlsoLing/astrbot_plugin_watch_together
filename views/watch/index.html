@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>观影室</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="head">
+        <div class="title">
+          <div class="logo">🍿</div>
+          <div class="title-text">
+            <h1>观影室</h1>
+            <p id="subtitle">正在读取状态…</p>
+          </div>
+        </div>
+        <div class="head-actions">
+          <button id="btnRefresh" class="btn ghost" type="button">刷新片库</button>
+          <button id="btnOpen" class="btn primary" type="button">打开观影室 ↗</button>
+        </div>
+      </header>
+
+      <div id="banner" class="banner" hidden>
+        <span id="bannerText"></span>
+        <code id="bannerUrl"></code>
+        <button id="btnCopy" class="btn tiny" type="button">复制链接</button>
+      </div>
+
+      <section class="cards" id="cards"></section>
+
+      <section class="bar">
+        <input id="search" placeholder="搜索片名…" autocomplete="off" />
+        <div class="bar-info" id="countInfo">—</div>
+      </section>
+
+      <section class="grid" id="grid">
+        <div class="empty">正在读取片库…</div>
+      </section>
+
+      <footer class="foot">
+        <span>AI 的点评会出现在观影室页面上，也会推送到发起观影的聊天会话。</span>
+        <span id="ffmpegInfo"></span>
+      </footer>
+    </div>
+
+    <div class="toasts" id="toasts"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

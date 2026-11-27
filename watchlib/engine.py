@@ -77,6 +77,7 @@ class WatchSession:
     intro_done: bool = False
     ended: bool = False
     stream_offset: float = 0.0
+    cues_loading: bool = False
 
     def info(self) -> dict:
         return {
@@ -88,6 +89,9 @@ class WatchSession:
             "has_sub": bool(self.cues),
             "subtitle": self.subtitle_name,
             "plot": self.plot[:400],
+            "poster": self.item.poster if self.item else "",
+            "source_kind": self.item.source if self.item else "",
+            "remote": bool(self.item and self.item.is_remote),
             "duration": self.duration,
             "position": round(self.position, 2),
             "playing": self.playing,
@@ -107,6 +111,7 @@ class WatchEngine:
         logger=None,
         submit: Callable[[Awaitable[Any]], Any] | None = None,
         ffmpeg_ok: bool = False,
+        subtitle_fetcher: Callable[[Any], Awaitable[str]] | None = None,
     ) -> None:
         self.library = library
         self._config_getter = config_getter
@@ -115,6 +120,7 @@ class WatchEngine:
         self.logger = logger
         self._submit = submit
         self.ffmpeg_ok = ffmpeg_ok
+        self.subtitle_fetcher = subtitle_fetcher
         self._lock = threading.RLock()
         self._sessions: dict[str, WatchSession] = {}
         self._subtitle_cache: dict[str, tuple[float, list[Cue]]] = {}
@@ -174,10 +180,40 @@ class WatchEngine:
             session.subtitle_name = name
         return len(cues)
 
+    async def _ensure_cues(self, session: WatchSession) -> None:
+        """媒体服务器来源、本地又没有字幕文件时，按需下载一次字幕文本。"""
+
+        if session.cues or session.item is None:
+            return
+        if session.item.remote_sub_index is None or self.subtitle_fetcher is None:
+            return
+        with self._lock:
+            if session.cues_loading:
+                return
+            session.cues_loading = True
+        try:
+            text = await self.subtitle_fetcher(session.item)
+            if text:
+                count = self.attach_subtitle_text(session, text, "媒体服务器字幕")
+                if self.logger:
+                    self.logger.info(f"[watch-together] 已从媒体服务器获取字幕（{count} 条）")
+        except Exception as exc:  # noqa: BLE001
+            if self.logger:
+                self.logger.warning(f"[watch-together] 获取媒体服务器字幕失败：{exc}")
+        finally:
+            with self._lock:
+                session.cues_loading = False
+
+    def schedule_fetch_subtitles(self, session: WatchSession) -> None:
+        self._spawn(self._ensure_cues(session))
+
     # ------------------------------------------------------------------ 会话
     def playback_kind(self, item: MediaItem | None) -> str:
         if item is None:
             return "none"
+        local_ok = item.local_path_ok and bool(item.path) and item.path.is_file()
+        if not local_ok:
+            return "remote" if item.remote_stream else "unsupported"
         if item.ext.lower() in BROWSER_EXTS:
             return "direct"
         if self.ffmpeg_ok and str(self._cfg("ffmpeg_mode", "off")) != "off":
@@ -356,6 +392,7 @@ class WatchEngine:
 
     async def _generate_ambient(self, session: WatchSession) -> Comment | None:
         try:
+            await self._ensure_cues(session)
             with self._lock:
                 if session.ended:
                     return None
@@ -404,6 +441,7 @@ class WatchEngine:
             title, plot = session.title, session.plot
         if not bool(self._cfg("intro_enabled", True)):
             return None
+        await self._ensure_cues(session)
         try:
             system, user = prompts.intro_prompt(
                 title=title,
@@ -431,6 +469,7 @@ class WatchEngine:
             return ""
         if session.ended:
             return ""
+        await self._ensure_cues(session)
         self._append(session, user_text, "user", session.position)
         with self._lock:
             position = session.position
@@ -528,6 +567,7 @@ class WatchEngine:
                 "playing": session.playing,
                 "duration": session.duration,
                 "ended": session.ended,
+                "has_sub": bool(session.cues),
             }
 
     def update_settings(self, session_id: str, payload: dict) -> dict:

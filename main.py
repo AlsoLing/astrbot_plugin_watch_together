@@ -75,6 +75,7 @@ _engine_mod = importlib.import_module(f"{_LIB}.engine")
 _ffmpeg_mod = importlib.import_module(f"{_LIB}.ffmpeg")
 _media_mod = importlib.import_module(f"{_LIB}.media")
 _server_mod = importlib.import_module(f"{_LIB}.server")
+_mediaserver_mod = importlib.import_module(f"{_LIB}.mediaserver")
 _subtitles_mod = importlib.import_module(f"{_LIB}.subtitles")
 
 WatchEngine = _engine_mod.WatchEngine
@@ -84,9 +85,19 @@ MediaLibrary = _media_mod.MediaLibrary
 ServerContext = _server_mod.ServerContext
 start_server = _server_mod.start_server
 stop_server = _server_mod.stop_server
+MediaServerSource = _mediaserver_mod.MediaServerSource
+MediaServerError = _mediaserver_mod.MediaServerError
 format_timestamp = _subtitles_mod.format_timestamp
 
 PLUGIN_NAME = "astrbot_plugin_watch_together"
+PLUGIN_VERSION = "1.1.0"
+
+# Dashboard 可视化视图用的辅助模块（老版本 AstrBot 可能没有）
+try:
+    from astrbot.api.web import json_response, request as web_request
+except Exception:  # noqa: BLE001 - 仅影响扩展功能页面
+    json_response = None  # type: ignore
+    web_request = None  # type: ignore
 
 
 class _ConfigView:
@@ -118,7 +129,7 @@ def detect_lan_ip() -> str:
         sock.close()
 
 
-@register(PLUGIN_NAME, "观影小队", "和 AI 一起看电影：AI 读字幕/看画面，实时吐槽解说", "1.0.1")
+@register(PLUGIN_NAME, "观影小队", "和 AI 一起看电影：AI 读字幕/看画面，实时吐槽解说", PLUGIN_VERSION)
 class WatchTogetherPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -126,17 +137,23 @@ class WatchTogetherPlugin(Star):
         self._loop: asyncio.AbstractEventLoop | None = None
         with contextlib.suppress(RuntimeError):
             self._loop = asyncio.get_running_loop()
+        self._vision_ok = True
 
         ffmpeg_path = find_ffmpeg(str(self.config.get("ffmpeg_path") or "ffmpeg"))
         self._ffmpeg = ffmpeg_path if ffmpeg_path and probe(ffmpeg_path) else None
         if str(self.config.get("ffmpeg_mode") or "off") != "off" and not self._ffmpeg:
             logger.warning("[watch-together] 配置了 ffmpeg 转封装，但没有找到可用的 ffmpeg")
 
+        # 媒体服务器（Jellyfin / Emby）后台刷新，片库扫描时零阻塞
+        self._media_server = MediaServerSource(_ConfigView(self.config), logger=logger)
+        self._media_server.start()
+
         self.engine = WatchEngine(
             library=MediaLibrary(
                 self._media_dirs,
                 refresh_seconds=int(self.config.get("library_refresh", 60) or 60),
                 logger=logger,
+                remote_provider=self._media_server.items,
             ),
             config_getter=_ConfigView(self.config),
             llm_call=self._llm_call,
@@ -144,13 +161,15 @@ class WatchTogetherPlugin(Star):
             logger=logger,
             submit=self._submit if self._loop else None,
             ffmpeg_ok=bool(self._ffmpeg),
+            subtitle_fetcher=self._fetch_remote_subtitle,
         )
         self._server = None
         self._thread: threading.Thread | None = None
         self._ctx: ServerContext | None = None
         self._start_lock = threading.Lock()
         self._start_error = ""
-        self._vision_ok = True
+
+        self._register_view_apis()
 
         if self._loop is not None:
             try:
@@ -195,6 +214,141 @@ class WatchTogetherPlugin(Star):
         if host.startswith(("172.", "10.88.")) or host == "127.0.0.1":
             return "（这个地址如果打不开，请在插件配置 public_host 填 NAS 的局域网 IP，例如 192.168.1.10）"
         return ""
+
+    # ------------------------------------------------------------------ 扩展功能页面
+    def _bot_name(self) -> str:
+        return str(self.config.get("bot_name") or "TA")
+
+    def _register_view_apis(self) -> None:
+        """注册 WebUI「扩展功能」页面用的接口。"""
+
+        if json_response is None or web_request is None:
+            return
+        try:
+            base = f"/{PLUGIN_NAME}"
+            self.context.register_web_api(f"{base}/status", self._api_status, ["GET"], "观影室状态")
+            self.context.register_web_api(f"{base}/library", self._api_library, ["GET"], "观影室片库")
+            self.context.register_web_api(f"{base}/play", self._api_play, ["POST"], "开始观影")
+            self.context.register_web_api(f"{base}/refresh", self._api_refresh, ["POST"], "刷新片库")
+            self.context.register_web_api(
+                f"{base}/test-media-server", self._api_test_media_server, ["POST"], "测试媒体服务器"
+            )
+        except Exception as exc:  # noqa: BLE001 - 老版本没有 register_web_api
+            logger.warning(f"[watch-together] 可视化页面接口注册失败（不影响其他功能）：{exc!r}")
+
+    def _view_status(self) -> dict:
+        library = self.engine.library
+        items = library.items()
+        active = [s for s in self.engine.all_sessions() if not s.ended]
+        return {
+            "ok": True,
+            "version": PLUGIN_VERSION,
+            "bot_name": self._bot_name(),
+            "port": self._port(),
+            "server": {
+                "running": self._server is not None,
+                "base_url": self._page_url(),
+                "error": self._start_error,
+            },
+            "library": {
+                "count": len(items),
+                "with_sub": sum(1 for item in items if item.subtitle),
+                "roots": library.roots(),
+                "errors": library.errors()[:6],
+            },
+            "media_server": self._media_server.status(),
+            "sessions": [
+                {
+                    "id": s.id,
+                    "title": s.title,
+                    "playing": s.playing,
+                    "position": round(s.position, 1),
+                    "comments": len(s.comments),
+                    "playback": s.playback,
+                }
+                for s in active
+            ],
+            "ffmpeg": bool(self._ffmpeg),
+            "defaults": {
+                "interval": int(self.config.get("comment_interval", 90) or 90),
+                "vision": bool(self.config.get("vision_enabled", True)),
+            },
+        }
+
+    def _view_library(self, keyword: str = "", limit: int = 120) -> dict:
+        library = self.engine.library
+        all_items = library.items()
+        items = library.search(keyword) if (keyword or "").strip() else all_items
+        try:
+            limit = max(1, min(int(limit), 500))
+        except (TypeError, ValueError):
+            limit = 120
+        return {
+            "ok": True,
+            "total": len(all_items),
+            "matched": len(items),
+            "items": [item.to_public() for item in items[:limit]],
+        }
+
+    def _view_play(self, movie_id: str) -> dict:
+        item = self.engine.library.get(movie_id) or self.engine.library.resolve(movie_id)
+        if item is None:
+            return {"ok": False, "error": "找不到这个片源，刷新片库再试试"}
+        session = self.engine.create_session(item=item, source="nas")
+        self.engine.schedule_intro(session)
+        return {
+            "ok": True,
+            "id": session.id,
+            "title": item.title,
+            "playback": session.playback,
+            "path": f"/?s={session.id}",
+        }
+
+    def _view_refresh(self) -> dict:
+        self.engine.library.scan(force=True)
+        if self._media_server.enabled:
+            self._media_server.refresh_once()
+        return {
+            "ok": True,
+            "count": len(self.engine.library.items()),
+            "media_server": self._media_server.status(),
+        }
+
+    def _view_test_media_server(self) -> dict:
+        try:
+            info = self._media_server.test_connection()
+        except MediaServerError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, **info}
+
+    async def _api_status(self):
+        return json_response(await asyncio.to_thread(self._view_status))
+
+    async def _api_library(self):
+        keyword = str(web_request.query.get("q", "") or "")
+        try:
+            limit = int(web_request.query.get("limit", 120))
+        except (TypeError, ValueError):
+            limit = 120
+        return json_response(await asyncio.to_thread(self._view_library, keyword, limit))
+
+    async def _api_play(self):
+        payload = await web_request.json(default={})
+        movie_id = str(payload.get("movie_id") or "")
+        return json_response(await asyncio.to_thread(self._view_play, movie_id))
+
+    async def _api_refresh(self):
+        return json_response(await asyncio.to_thread(self._view_refresh))
+
+    async def _api_test_media_server(self):
+        return json_response(await asyncio.to_thread(self._view_test_media_server))
+
+    async def _fetch_remote_subtitle(self, item) -> str:
+        if self._media_server is None:
+            return ""
+        return await asyncio.to_thread(self._media_server.fetch_subtitle, item)
 
     # ------------------------------------------------------------------ 服务
     def _submit(self, coro):
@@ -407,6 +561,8 @@ class WatchTogetherPlugin(Star):
             )
         elif session.playback == "remux":
             lines.append("ℹ️ 正在用 ffmpeg 实时转封装（实验功能，拖动进度可能不准）。")
+        if session.playback == "remote":
+            lines.append("ℹ️ 本片来自媒体服务器，直接由它串流播放（格式不支持时可用外部播放器模式）。")
         if not session.cues:
             lines.append("⚠️ 没找到字幕，我主要靠画面理解，可以在网页里手动加载字幕。")
         lines.append("")
@@ -502,6 +658,8 @@ class WatchTogetherPlugin(Star):
 
         with contextlib.suppress(Exception):
             self.engine.close_all()
+        with contextlib.suppress(Exception):
+            self._media_server.stop()
         stop_server(self._server)
         self._server = None
         self._thread = None

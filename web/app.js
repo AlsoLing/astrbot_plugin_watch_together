@@ -362,7 +362,11 @@
       el.video.src = options.src;
       mountVideo(info);
       maybeAutoplay(options.autoplay);
-    } else if (info.playback === "direct" || info.playback === "remux") {
+    } else if (
+      info.playback === "direct" ||
+      info.playback === "remux" ||
+      info.playback === "remote"
+    ) {
       const suffix = info.playback === "remux" ? "?t=0" : "";
       el.video.src = `/api/stream/${info.id}${suffix}`;
       mountVideo(info);
@@ -373,6 +377,29 @@
 
     await primeHistory();
     startTimers();
+    if (info.playback === "remote") {
+      if (!info.has_sub) {
+        api(`/api/session/${info.id}/fetch-subtitle`, { method: "POST" }).catch(() => {});
+        setTimeout(refreshSubtitleState, 4000);
+      }
+    }
+  }
+
+  async function refreshSubtitleState() {
+    const session = state.session;
+    if (!session || session.has_sub) return;
+    try {
+      const info = await api(`/api/session/${session.id}`);
+      if (info.has_sub) {
+        session.has_sub = true;
+        session.subtitle = info.subtitle || "媒体服务器字幕";
+        setupTrack(state.baseOffset);
+        el.nowMeta.textContent = metaLine(session);
+        toast("字幕已从媒体服务器加载");
+      }
+    } catch (err) {
+      /* ignore */
+    }
   }
 
   function mountVideo(info) {
@@ -380,7 +407,9 @@
     el.placeholder.hidden = true;
     el.externalPanel.hidden = true;
     el.screen.hidden = false;
-    el.video.controls = info.playback === "direct" || info.source === "local";
+    el.video.controls =
+      info.playback === "direct" || info.playback === "remote" || info.source === "local";
+    el.video.poster = info.poster || "";
     el.remuxBar.hidden = info.playback !== "remux";
     el.remuxPlay.textContent = "▶";
     if (info.has_sub) setupTrack(0);
@@ -444,6 +473,7 @@
     }
     for (const track of Array.from(el.video.querySelectorAll("track"))) track.remove();
     el.video.removeAttribute("src");
+    el.video.removeAttribute("poster");
     el.video.load();
     el.video.style.display = "";
     el.remuxBar.hidden = true;
@@ -457,13 +487,17 @@
 
   function metaLine(info) {
     const bits = [];
-    bits.push(
-      info.source === "nas"
-        ? "NAS 片源"
-        : info.source === "local"
-          ? "本地文件"
-          : "外部播放器"
-    );
+    if (info.remote) {
+      bits.push(info.source_kind === "emby" ? "Emby 片源" : "Jellyfin 片源");
+    } else {
+      bits.push(
+        info.source === "nas"
+          ? "NAS 片源"
+          : info.source === "local"
+            ? "本地文件"
+            : "外部播放器"
+      );
+    }
     bits.push(info.has_sub ? `字幕 ${info.subtitle || "已加载"}` : "无字幕");
     if (info.playback === "remux") bits.push("ffmpeg 转封装");
     if (info.linked_chat) bits.push("已连接聊天");

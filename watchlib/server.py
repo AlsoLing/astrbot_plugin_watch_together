@@ -28,7 +28,7 @@ from .ffmpeg import build_command
 
 __all__ = ["ServerContext", "WatchHTTPServer", "start_server", "stop_server"]
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 CHUNK = 256 * 1024
 SESSION_ROUTE = re.compile(r"^/api/session/([0-9a-fA-F]{6,32})(?:/([a-zA-Z.]+))?$")
 STREAM_ROUTE = re.compile(r"^/api/stream/([0-9a-fA-F]{6,32})$")
@@ -215,6 +215,13 @@ class WatchHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(data)
 
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
     # ------------------------------------------------------------- 路由
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(204)
@@ -336,6 +343,12 @@ class WatchHandler(BaseHTTPRequestHandler):
                 return self._frame(session_id, query)
             if action == "subtitle":
                 return self._upload_subtitle(session_id)
+            if action == "fetch-subtitle":
+                session = self._require_session(session_id)
+                if session is None:
+                    return
+                self.ctx.engine.schedule_fetch_subtitles(session)
+                return self._send_json({"ok": True})
             if action == "settings":
                 payload = self._json_body()
                 return self._send_json(self.ctx.engine.update_settings(session_id, payload))
@@ -499,6 +512,13 @@ class WatchHandler(BaseHTTPRequestHandler):
         session = self.ctx.engine.get(session_id)
         if session is None:
             return self._send_error_json("session_not_found", 404)
+
+        if session.playback == "remote":
+            target = session.item.remote_stream if session.item else ""
+            if not target:
+                return self._send_error_json("remote_stream_missing", 404)
+            return self._redirect(target)
+
         if session.item is None or session.playback in ("none", "local"):
             return self._send_error_json("no_server_side_file", 404)
         path = Path(session.item.path)
