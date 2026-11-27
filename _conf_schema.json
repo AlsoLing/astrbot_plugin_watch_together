@@ -1,0 +1,114 @@
+{
+  "media_dirs": {
+    "description": "电影目录",
+    "type": "list",
+    "default": [],
+    "hint": "填 AstrBot 所在机器/容器里能读到的路径，例如 /volume1/video/movies 或 /Movies。可以填多个；支持子目录递归扫描。"
+  },
+  "provider_id": {
+    "description": "使用的聊天模型",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "留空则使用当前会话的默认模型。建议选一个支持看图的模型（如 GPT-4o、Gemini、Qwen-VL），AI 才能理解画面。"
+  },
+  "bot_name": {
+    "description": "AI 在观影室里的名字",
+    "type": "string",
+    "default": "TA",
+    "hint": "显示在网页标题和点评气泡里。"
+  },
+  "persona_prompt": {
+    "description": "观影人格补充设定",
+    "type": "text",
+    "default": "",
+    "hint": "会追加到提示词里，例如「你是个毒舌影评人，喜欢吐槽逻辑漏洞，但很懂电影」。留空则使用默认的「像朋友一样小声点评」。"
+  },
+  "comment_interval": {
+    "description": "点评间隔（秒）",
+    "type": "int",
+    "default": 90,
+    "slider": { "min": 30, "max": 300, "step": 10 },
+    "hint": "每隔多久让 AI 说一句。太短会显得吵，太长又没存在感；90 秒比较舒服。"
+  },
+  "comment_max_chars": {
+    "description": "单条点评字数上限",
+    "type": "int",
+    "default": 100,
+    "slider": { "min": 40, "max": 200, "step": 10 }
+  },
+  "vision_enabled": {
+    "description": "允许 AI 看画面",
+    "type": "bool",
+    "default": true,
+    "hint": "浏览器每 20 秒截一帧低分辨率画面发给多模态模型。关闭后只靠字幕；模型不支持读图时会自动退回纯文本。"
+  },
+  "intro_enabled": {
+    "description": "开场白",
+    "type": "bool",
+    "default": true,
+    "hint": "电影开始时让 AI 先说一句。"
+  },
+  "push_comments_to_chat": {
+    "description": "把点评推送到聊天",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，AI 的点评会同时发到发起观影的那个会话（QQ/Telegram 等）。"
+  },
+  "chat_bridge": {
+    "description": "观影期间聊天桥接",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，看电影时在聊天里说话，AI 会结合当前剧情回应，而不是普通聊天。"
+  },
+  "chat_bridge_mode": {
+    "description": "聊天桥接触发方式",
+    "type": "string",
+    "options": ["wake", "always"],
+    "labels": ["需要 @ 或私聊（推荐）", "所有消息"],
+    "default": "wake",
+    "hint": "群聊里建议用 wake，避免机器人抢话。"
+  },
+  "llm_timeout": {
+    "description": "模型超时（秒）",
+    "type": "int",
+    "default": 90
+  },
+  "server_host": {
+    "description": "观影室监听地址",
+    "type": "string",
+    "default": "0.0.0.0",
+    "hint": "一般不用改。Docker 部署时如果是 host 网络或已映射端口，0.0.0.0 即可。"
+  },
+  "server_port": {
+    "description": "观影室端口",
+    "type": "int",
+    "default": 6199,
+    "hint": "电脑浏览器访问的端口。Docker 部署需要把该端口映射出来，例如 -p 6199:6199。"
+  },
+  "public_host": {
+    "description": "对外地址（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "留空则自动探测 NAS 的局域网 IP。若走反向代理或域名，填例如 movie.example.com 或 192.168.1.10。"
+  },
+  "library_refresh": {
+    "description": "片库缓存时间（秒）",
+    "type": "int",
+    "default": 60
+  },
+  "ffmpeg_mode": {
+    "description": "浏览器不支持格式时的处理",
+    "type": "string",
+    "options": ["off", "remux", "transcode"],
+    "labels": ["关闭（只播 mp4/webm）", "实时转封装（推荐，几乎不吃 CPU）", "实时转码（很吃 CPU）"],
+    "default": "off",
+    "hint": "MKV 最常见。remux 只换容器不重编码，要求 H.264/H.265 + AAC；transcode 会重新编码，NAS 性能不够会卡。"
+  },
+  "ffmpeg_path": {
+    "description": "ffmpeg 路径",
+    "type": "string",
+    "default": "ffmpeg",
+    "hint": "默认从 PATH 里找；也可以填绝对路径，例如 /usr/bin/ffmpeg。Docker 镜像里通常没有 ffmpeg。"
+  }
+}

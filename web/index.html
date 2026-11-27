@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>一起观影</title>
+    <link rel="icon" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">🍿</div>
+        <div class="brand-text">
+          <h1>一起观影</h1>
+          <p id="brandSub">选一部片，和 AI 边看边聊</p>
+        </div>
+      </div>
+      <div class="top-right">
+        <span class="status-dot" id="aiDot"></span>
+        <span class="status-text" id="aiState">空闲</span>
+        <button class="ghost" id="btnSettings" type="button">设置</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel library">
+        <div class="panel-head">
+          <h2>片库</h2>
+          <div class="panel-actions">
+            <button class="icon" id="btnRefresh" title="重新扫描" type="button">⟳</button>
+          </div>
+        </div>
+        <input class="search" id="search" placeholder="搜索片名…" autocomplete="off" />
+        <div class="list" id="libList">
+          <div class="empty">正在读取片库…</div>
+        </div>
+        <div class="panel-foot">
+          <button class="ghost wide" id="btnLocal" type="button">📂 打开电脑上的影片</button>
+          <button class="ghost wide" id="btnExternal" type="button">🕒 用外部播放器</button>
+          <input type="file" id="localFile" accept="video/*,.mkv,.avi,.rmvb,.ts" hidden />
+          <input type="file" id="localSub" accept=".srt,.ass,.ssa,.vtt" hidden />
+        </div>
+      </aside>
+
+      <section class="stage">
+        <div class="screen" id="screen">
+          <video id="video" playsinline crossorigin="anonymous"></video>
+          <div class="placeholder" id="placeholder">
+            <div class="ph-icon">🎬</div>
+            <h3>挑一部片子，一起看</h3>
+            <p>AI 会跟着字幕看剧情，看到有意思的地方会小声说一句。</p>
+            <p class="ph-tip">NAS 上的片源直接点播，也可以打开电脑里的文件</p>
+          </div>
+          <div class="subtitle-layer" id="subtitleLayer"></div>
+          <div class="thinking" id="thinking" hidden>
+            <span class="dots"><i></i><i></i><i></i></span> AI 在想…
+          </div>
+
+          <div class="remux-bar" id="remuxBar" hidden>
+            <button class="icon big" id="remuxPlay" type="button">▶</button>
+            <span class="remux-clock" id="remuxClock">00:00</span>
+            <div class="jump">
+              <input id="remuxJump" placeholder="12:34" inputmode="numeric" />
+              <button class="ghost small" id="remuxJumpGo" type="button">跳转</button>
+            </div>
+            <span class="remux-tip">转封装模式</span>
+            <button class="icon" id="remuxFull" type="button">⛶</button>
+          </div>
+        </div>
+
+        <div class="external-panel" id="externalPanel" hidden>
+          <div class="big-clock" id="extClock">00:00</div>
+          <p>在电脑上用任意播放器打开这部电影，按下播放后点「开始同步」。</p>
+          <label class="ext-pick">
+            <span>参考片源（用来读字幕）</span>
+            <select id="extMovie"></select>
+          </label>
+          <div class="row">
+            <button class="primary" id="extStart" type="button">▶ 开始同步</button>
+            <button class="ghost" id="extPause" type="button">暂停</button>
+            <button class="ghost" id="extMinus" type="button">-10 秒</button>
+            <button class="ghost" id="extPlus" type="button">+10 秒</button>
+          </div>
+          <p class="hint">AI 的点评会出现在右下角的观影笔记里，也会推送到你的聊天窗口。</p>
+        </div>
+
+        <div class="now">
+          <div class="now-main">
+            <div class="now-title" id="nowTitle">还没有开始</div>
+            <div class="now-meta" id="nowMeta">—</div>
+          </div>
+          <div class="now-actions">
+            <button class="ghost small" id="btnSubtitle" type="button" hidden>加载字幕</button>
+            <button class="ghost small" id="btnEnd" type="button" hidden>结束</button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel notes">
+        <div class="panel-head">
+          <h2>观影笔记</h2>
+          <span class="badge" id="noteCount">0</span>
+        </div>
+        <div class="notes-list" id="noteList">
+          <div class="empty">开始播放后，AI 的吐槽会出现在这里。</div>
+        </div>
+        <form class="chat" id="chatForm">
+          <input id="chatInput" placeholder="和 TA 说点什么…" autocomplete="off" />
+          <button class="primary" type="submit" id="chatSend">发送</button>
+        </form>
+      </aside>
+    </main>
+
+    <div class="modal" id="settingsModal" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>观影设置</h3>
+          <button class="icon" id="btnCloseSettings" type="button">✕</button>
+        </div>
+        <label class="field">
+          <span>说话间隔 <b id="intervalValue">90 秒</b></span>
+          <input type="range" id="intervalRange" min="30" max="300" step="10" value="90" />
+          <small class="hint">每隔这么久，AI 会挑一句台词说点什么。</small>
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="visionToggle" checked />
+          <span>让 AI 看画面（定时截图发给多模态模型）</span>
+        </label>
+        <p class="hint">只发当前一帧画面，不写磁盘；模型不支持读图时会自动退回纯字幕。</p>
+        <div class="modal-foot">
+          <button class="primary" id="btnSaveSettings" type="button">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toasts" id="toasts"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,2 @@
+# 本插件只依赖 Python 标准库（http.server / subprocess / json / re ...），
+# 不需要任何第三方包。这里保留空文件只是为了兼容插件安装流程。
