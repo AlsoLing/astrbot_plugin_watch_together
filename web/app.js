@@ -40,6 +40,8 @@
     nowMeta: $("nowMeta"),
     btnEnd: $("btnEnd"),
     btnSubtitle: $("btnSubtitle"),
+    btnSubInfo: $("btnSubInfo"),
+    subtitleTip: $("subtitleTip"),
     noteList: $("noteList"),
     noteCount: $("noteCount"),
     chatForm: $("chatForm"),
@@ -350,6 +352,9 @@
     el.nowMeta.textContent = metaLine(info);
     el.btnEnd.hidden = false;
     el.btnSubtitle.hidden = !(info.source === "local" || !info.has_sub);
+    el.btnSubInfo.hidden = Boolean(info.has_sub);
+    el.subtitleTip.hidden = true;
+    el.subtitleTip.innerHTML = "";
     el.placeholder.hidden = true;
     el.externalPanel.hidden = true;
     el.remuxBar.hidden = true;
@@ -381,6 +386,9 @@
       api(`/api/session/${info.id}/fetch-subtitle`, { method: "POST" }).catch(() => {});
       setTimeout(refreshSubtitleState, 2500);
       setTimeout(refreshSubtitleState, 6000);
+      setTimeout(() => {
+        if (state.session && !state.session.has_sub) showSubtitleInfo(true);
+      }, 7200);
     }
   }
 
@@ -394,10 +402,51 @@
         session.subtitle = info.subtitle || "媒体服务器字幕";
         setupTrack(state.baseOffset);
         el.nowMeta.textContent = metaLine(session);
+        el.btnSubInfo.hidden = true;
+        el.subtitleTip.hidden = true;
         toast("字幕已加载（内嵌/媒体服务器）");
       }
     } catch (err) {
       /* ignore */
+    }
+  }
+
+  /** 字幕诊断：把「为什么没有字幕」说清楚，别让人瞎猜。 */
+  async function showSubtitleInfo(auto = false) {
+    const session = state.session;
+    if (!session) return;
+    try {
+      const info = await api(`/api/session/${session.id}/subtitle-info`);
+      if (info.has_sub) {
+        session.has_sub = true;
+        session.subtitle = info.subtitle || session.subtitle || "字幕";
+        setupTrack(state.baseOffset);
+        el.nowMeta.textContent = metaLine(session);
+        el.btnSubInfo.hidden = true;
+        el.subtitleTip.hidden = true;
+        return;
+      }
+      const lines = [];
+      if (info.hint) lines.push(info.hint);
+      const tracks = info.embedded?.tracks || [];
+      const textTracks = tracks.filter((track) => !track.bitmap);
+      if (textTracks.length) {
+        lines.push(
+          "内嵌文本字幕轨：" +
+            textTracks
+              .map((track) => `${track.codec}${track.language ? "/" + track.language : ""}`)
+              .join("、")
+        );
+      } else if (tracks.length) {
+        lines.push("内嵌字幕轨：" + tracks.map((track) => track.codec).join("、") + "（图片字幕）");
+      }
+      if (info.sidecar?.found) lines.push(`外挂字幕：${info.sidecar.found}`);
+      if (info.note) lines.push(`状态：${info.note}`);
+      if (info.item?.remote) lines.push("片源来自媒体服务器，文件本身可能在 NAS 的另一台机器上。");
+      el.subtitleTip.innerHTML = lines.map((line) => `<div>${escapeHtml(line)}</div>`).join("");
+      el.subtitleTip.hidden = !lines.length;
+    } catch (err) {
+      if (!auto) toast(`字幕诊断失败：${err.message}`, true);
     }
   }
 
@@ -844,6 +893,7 @@
       if (file) uploadSubtitle(file);
     });
     el.btnSubtitle.addEventListener("click", () => el.localSub.click());
+    el.btnSubInfo.addEventListener("click", () => showSubtitleInfo(false));
     el.btnExternal.addEventListener("click", startExternal);
     el.btnEnd.addEventListener("click", endSession);
     el.btnSettings.addEventListener("click", openSettings);

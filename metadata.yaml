@@ -11,15 +11,16 @@ desc: |
 
   功能：
   - 片库扫描：自动识别 SRT / ASS / VTT 字幕与 Emby/Jellyfin 的 nfo 简介
-  - 内嵌字幕：用 ffmpeg 提取 MKV/MP4 里封装的字幕轨（需要 ffmpeg）
+  - 内嵌字幕：MKV/MP4 里封装的字幕轨自动提取；装 ffmpeg 用 ffmpeg，没装用内置纯 Python 解析
+  - 字幕诊断：网页里点一下就说清楚「为什么没字幕」（外挂/内嵌/位图/媒体服务器）
   - 媒体服务器：可直连 Jellyfin / Emby，读片单、海报、简介和字幕
   - 局域网识别：轮询 Jellyfin/Emby 正在播放会话或 VLC Web 界面，自动跟着进度点评
   - 三种看法：NAS 点播（mp4/webm）、打开电脑本地文件、外部播放器同步计时
   - WebUI 页面：在「扩展功能 → 观影室」里浏览片库、看状态、一键开播
   - AI 点评：字幕上下文 + 可选画面截图，控制频率、避免剧透和重复
-  - 长期记忆：看完自动记一笔，下次开场白带上；可写入记忆插件或 webhook
+  - 长期记忆：直接串联 LivingMemory——开场前读旧记忆，散场后写新记忆
   - 零额外依赖：只用 Python 标准库；MKV 等格式可选 ffmpeg 实时转封装
-version: 1.2.1
+version: 1.3.0
 author: AlsoLing
 repo: https://github.com/your-name/astrbot_plugin_watch_together
 astrbot_version: ">=4.5.7"

@@ -201,7 +201,14 @@
     "description": "长期记忆",
     "type": "bool",
     "default": true,
-    "hint": "看完自动记一笔（片名、进度、聊过的话），下次开场白会带上；同时尝试写入记忆插件。"
+    "hint": "看完自动记一笔（片名、进度、聊过的话），下次开场白会带上；装了 LivingMemory 时会直接写进它的长期记忆。"
+  },
+  "livingmemory_mode": {
+    "description": "串联 LivingMemory",
+    "type": "string",
+    "default": "auto",
+    "options": ["auto", "off"],
+    "hint": "auto：自动找到同进程里的 LivingMemory 插件，开场前读旧记忆、散场后写新记忆；没装就自动跳过。off：只用插件自带的本地观影记忆。"
   },
   "memory_plugin": {
     "description": "要适配的记忆插件",

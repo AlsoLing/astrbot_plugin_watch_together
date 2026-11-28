@@ -184,32 +184,72 @@ class MediaItem:
         return " · ".join(bits)
 
 
-def _pick_subtitle(video: Path, subs: Iterable[Path]) -> tuple[Path | None, str]:
+_SEPARATORS = (".", "_", "-", " ", "·")
+
+
+def _subtitle_tag(video_stem: str, sub_stem: str) -> str | None:
+    """``movie.chs.srt`` / ``movie_chs.srt`` 这类同名字幕的后缀。"""
+
+    video_lower = video_stem.lower()
+    sub_lower = sub_stem.lower()
+    if sub_lower == video_lower:
+        return ""
+    for sep in _SEPARATORS:
+        if sub_lower.startswith(video_lower + sep):
+            return sub_stem[len(video_stem) + 1 :]
+    return None
+
+
+def _guess_tag(sub_stem: str) -> str:
+    """猜语言标签：取最后一个分隔符后面的部分，如 ``movie.chs`` → ``chs``。"""
+
+    for sep in _SEPARATORS:
+        if sep in sub_stem:
+            return sub_stem.rsplit(sep, 1)[-1]
+    # 完全没分隔符（如「简体中文.ass」）就把文件名本身当标签
+    return sub_stem
+
+
+def _pick_subtitle(
+    video: Path, subs: Iterable[Path], videos: Iterable[Path] = ()
+) -> tuple[Path | None, str]:
+    """挑最合适的同名字幕；目录里只有一部片子时允许名字对不上（外挂字幕组常见）。"""
+
     stem = video.stem
+    others = [
+        item.stem.lower()
+        for item in videos
+        if Path(item).stem.lower() != stem.lower()
+    ]
     best: tuple[int, int, str, Path] | None = None
+    loose: list[tuple[int, int, str, Path]] = []
     for sub in subs:
-        sub_stem = sub.stem
-        if sub_stem == stem:
-            tag = ""
-        elif sub_stem.lower().startswith(stem.lower() + "."):
-            tag = sub_stem[len(stem) + 1 :]
-        else:
+        tag = _subtitle_tag(stem, sub.stem)
+        if tag is None:
+            # 名字完全对不上：只有在目录里只有这一部片子时才当备选（字幕组常乱起名）
+            if others:
+                continue
+            guess = _guess_tag(sub.stem)
+            loose.append((_lang_score(guess), len(sub.name), guess, sub))
             continue
         score = _lang_score(tag)
-        # 分数相同则优先名字更短的（通常是主字幕）
         candidate = (score, len(sub.name), tag, sub)
         if best is None or candidate[:2] < best[:2]:
             best = candidate
-    if best is None:
-        return None, ""
-    return best[3], best[2]
+    if best is not None:
+        return best[3], best[2]
+    if loose:
+        loose.sort(key=lambda item: item[:2])
+        return loose[0][3], loose[0][2]
+    return None, ""
 
 
 def find_local_subtitle(video: Path) -> tuple[Path | None, str]:
     """在影片同目录（以及 Subs/ 字幕/ 子目录）里找同名字幕。"""
 
+    video = Path(video)
+    folder = video.parent
     candidates: list[Path] = []
-    folder = Path(video).parent
     try:
         candidates.extend(p for p in folder.iterdir() if p.suffix.lower() in SUBTITLE_EXTS)
     except OSError:
@@ -222,7 +262,12 @@ def find_local_subtitle(video: Path) -> tuple[Path | None, str]:
             candidates.extend(p for p in sub_dir.iterdir() if p.suffix.lower() in SUBTITLE_EXTS)
         except OSError:
             continue
-    return _pick_subtitle(Path(video), candidates)
+    videos: list[Path] = []
+    try:
+        videos = [p for p in folder.iterdir() if p.suffix.lower() in VIDEO_EXTS]
+    except OSError:
+        videos = [video]
+    return _pick_subtitle(video, candidates, videos)
 
 
 class MediaLibrary:
@@ -294,7 +339,7 @@ class MediaLibrary:
                         stat = video.stat()
                     except OSError:
                         continue
-                    subtitle, tag = _pick_subtitle(video, subs)
+                    subtitle, tag = _pick_subtitle(video, subs, videos)
                     nfo = video.with_suffix(".nfo")
                     info = read_nfo(nfo) if nfo.is_file() else {}
                     rel = str(video.relative_to(root_path))
@@ -351,6 +396,12 @@ class MediaLibrary:
         self.scan(force)
         with self._lock:
             return sorted(self._items.values(), key=lambda item: item.mtime, reverse=True)
+
+    def cached(self) -> list[MediaItem]:
+        """只读缓存，不触发扫描（给后台线程做匹配用，避免互相等锁）。"""
+
+        with self._lock:
+            return list(self._items.values())
 
     def errors(self) -> list[str]:
         with self._lock:

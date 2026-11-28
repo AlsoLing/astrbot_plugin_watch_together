@@ -78,8 +78,13 @@ _server_mod = importlib.import_module(f"{_LIB}.server")
 _mediaserver_mod = importlib.import_module(f"{_LIB}.mediaserver")
 _embedded_mod = importlib.import_module(f"{_LIB}.embedded")
 _memory_mod = importlib.import_module(f"{_LIB}.memory")
+_living_mod = importlib.import_module(f"{_LIB}.livingmemory")
 _players_mod = importlib.import_module(f"{_LIB}.players")
 _subtitles_mod = importlib.import_module(f"{_LIB}.subtitles")
+try:
+    _native_mod = importlib.import_module(f"{_LIB}.embedded_native")
+except Exception:  # noqa: BLE001 - 老版本包可能还没有这个模块
+    _native_mod = None
 
 WatchEngine = _engine_mod.WatchEngine
 find_ffmpeg = _ffmpeg_mod.find_ffmpeg
@@ -93,11 +98,16 @@ MediaServerError = _mediaserver_mod.MediaServerError
 embedded_extract = _embedded_mod.extract_for
 WatchMemory = _memory_mod.WatchMemory
 MemoryBridge = _memory_mod.MemoryBridge
+LivingMemoryClient = _living_mod.LivingMemoryClient
 PlayerWatcher = _players_mod.PlayerWatcher
 format_timestamp = _subtitles_mod.format_timestamp
+find_local_subtitle = _media_mod.find_local_subtitle
+decode_subtitle_bytes = _subtitles_mod.decode_subtitle_bytes
+native_extract = getattr(_native_mod, "extract", None) if _native_mod else None
+native_probe = getattr(_native_mod, "probe", None) if _native_mod else None
 
 PLUGIN_NAME = "astrbot_plugin_watch_together"
-PLUGIN_VERSION = "1.2.1"
+PLUGIN_VERSION = "1.3.0"
 
 # Dashboard 可视化视图用的辅助模块（老版本 AstrBot 可能没有）
 try:
@@ -152,12 +162,22 @@ class WatchTogetherPlugin(Star):
             logger.warning("[watch-together] 配置了 ffmpeg 转封装，但没有找到可用的 ffmpeg")
 
         # 媒体服务器（Jellyfin / Emby）后台刷新，片库扫描时零阻塞
-        self._media_server = MediaServerSource(_ConfigView(self.config), logger=logger)
+        self._media_server = MediaServerSource(
+            _ConfigView(self.config),
+            logger=logger,
+            local_items=lambda: self.engine.library.cached() if getattr(self, "engine", None) else [],
+        )
         self._media_server.start()
 
-        # 长期记忆：本地观影记忆 + 外接记忆插件
+        # 长期记忆：本地观影记忆 + LivingMemory 串联 + 外接记忆插件
         self._memory_enabled = bool(self.config.get("memory_enabled", True))
         self._memory = WatchMemory(self._memory_path())
+        self._living = LivingMemoryClient(
+            self.context,
+            lambda: self.config,
+            logger=logger,
+            submit=self._submit if self._loop else None,
+        )
         self._memory_bridge = MemoryBridge(
             self.context,
             plugin_name=str(self.config.get("memory_plugin") or "astrbot_plugin_sugarmemory_clean"),
@@ -165,7 +185,12 @@ class WatchTogetherPlugin(Star):
             submit=self._submit if self._loop else None,
             webhook=str(self.config.get("memory_webhook") or ""),
         )
-        if self._memory_enabled:
+        if self._memory_enabled and self._living.enabled:
+            logger.info(
+                "[watch-together] LivingMemory 串联已开启：开场前读旧记忆，散场后写入新记忆"
+                "（插件没装或未初始化时自动跳过）"
+            )
+        elif self._memory_enabled:
             try:
                 found = self._memory_bridge.discover()
                 logger.info(
@@ -189,6 +214,7 @@ class WatchTogetherPlugin(Star):
             ffmpeg_ok=bool(self._ffmpeg),
             subtitle_fetcher=self._fetch_subtitle,
             memory_provider=self._memory_context,
+            memory_recaller=self._recall_memory,
             on_session_end=self._remember_session,
         )
         self._watcher = PlayerWatcher(
@@ -293,6 +319,7 @@ class WatchTogetherPlugin(Star):
             "memory": {
                 "enabled": self._memory_enabled,
                 "recent": len(self._memory.recent(n=100)) if self._memory else 0,
+                "livingmemory": self._living.status(),
             },
             "sessions": [
                 {
@@ -383,11 +410,11 @@ class WatchTogetherPlugin(Star):
         return json_response(await asyncio.to_thread(self._view_test_media_server))
 
     async def _fetch_subtitle(self, item) -> str:
-        """外挂字幕 → 媒体服务器字幕 → 内嵌软字幕，逐级兜底。"""
+        """媒体服务器字幕 → 同目录外挂字幕 → 内嵌字幕（ffmpeg / 纯 Python 兜底）。"""
 
         if item is None:
             return ""
-        if item.remote_sub_index is not None and self._media_server is not None:
+        if item.remote_id and self._media_server is not None:
             try:
                 text = await asyncio.to_thread(self._media_server.fetch_subtitle, item)
             except Exception as exc:  # noqa: BLE001
@@ -395,14 +422,101 @@ class WatchTogetherPlugin(Star):
             else:
                 if text:
                     return text
-        if (
-            bool(self.config.get("embedded_subtitles", True))
-            and self._ffmpeg
-            and item.path
-            and item.path.is_file()
-        ):
-            return await asyncio.to_thread(embedded_extract, item.path, self._ffmpeg)
+
+        path = Path(item.path) if item.path else None
+        if path is not None and path.is_file():
+            # 有些条目的字幕是扫描之后才放进目录的，这里现找一遍
+            try:
+                subtitle, tag = await asyncio.to_thread(find_local_subtitle, path)
+            except Exception:  # noqa: BLE001
+                subtitle, tag = None, ""
+            if subtitle is not None:
+                try:
+                    data = await asyncio.to_thread(Path(subtitle).read_bytes)
+                except OSError:
+                    data = b""
+                text = decode_subtitle_bytes(data) if data else ""
+                if text:
+                    item.subtitle = Path(subtitle)
+                    item.subtitle_tag = tag
+                    return text
+
+            if not bool(self.config.get("embedded_subtitles", True)):
+                return ""
+            if self._ffmpeg:
+                text = await asyncio.to_thread(embedded_extract, path, self._ffmpeg)
+                if text:
+                    return text
+            # 没装 ffmpeg 时用纯 Python 解析 MKV/MP4 里的文本字幕
+            if native_extract is not None:
+                try:
+                    text = await asyncio.to_thread(native_extract, path)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[watch-together] 纯 Python 字幕提取失败：{exc}")
+                else:
+                    if text:
+                        return text
         return ""
+
+    def _subtitle_diag(self, session) -> dict:
+        """观影室里「为什么没字幕」的诊断信息（跑在 HTTP 线程里）。"""
+
+        item = getattr(session, "item", None)
+        path = Path(item.path) if (item is not None and item.path) else None
+        info: dict = {
+            "ok": True,
+            "has_sub": bool(session.cues),
+            "subtitle": session.subtitle_name,
+            "cues": len(session.cues),
+            "note": session.subtitle_note,
+            "playback": session.playback,
+            "item": {
+                "title": item.title if item else "",
+                "source": item.source if item else "",
+                "path": str(path) if path else "",
+                "exists": bool(path and path.is_file()),
+                "remote": bool(item.remote_stream) if item else False,
+                "remote_sub_index": item.remote_sub_index if item else None,
+            },
+            "sidecar": {"found": "", "tag": ""},
+            "embedded": {"ffmpeg": bool(self._ffmpeg), "tracks": []},
+            "hint": "",
+        }
+        bitmap_only = False
+        if path is not None and path.is_file():
+            try:
+                subtitle, tag = find_local_subtitle(path)
+            except Exception:  # noqa: BLE001
+                subtitle, tag = None, ""
+            if subtitle is not None:
+                info["sidecar"] = {"found": Path(subtitle).name, "tag": tag}
+            tracks: list[dict] = []
+            if native_probe is not None:
+                try:
+                    tracks = native_probe(path) or []
+                except Exception:  # noqa: BLE001
+                    tracks = []
+            info["embedded"]["tracks"] = tracks
+            text_tracks = [track for track in tracks if not track.get("bitmap")]
+            bitmap_only = bool(tracks) and not text_tracks
+        elif item is not None and item.remote_stream:
+            info["hint"] = "这个条目来自媒体服务器，NAS 上看不到原始文件；字幕只能从媒体服务器取。"
+        if session.cues:
+            info["hint"] = f"字幕已加载：{session.subtitle_name or '文本字幕'}"
+        elif bitmap_only:
+            info["hint"] = (
+                "片子里是图片字幕（PGS / VobSub），浏览器和 AI 都读不了文本。"
+                "用绿联影视中心 / VLC 直接看可以显示；想在这里看，需要在媒体服务器里"
+                "转成文本字幕，或者手动上传一份 srt。"
+            )
+        elif info["sidecar"]["found"]:
+            info["hint"] = "找到了外挂字幕文件，点「重新获取字幕」再试一次。"
+        elif not info["hint"]:
+            info["hint"] = (
+                "没检测到可读的字幕轨。可能是硬字幕、字幕名字对不上，或者文件在 NAS 上"
+                "但 AstrBot 容器里看不到；可以点「加载字幕」手动传一份 srt/ass。"
+            )
+        return info
 
     # ------------------------------------------------------------------ 长期记忆
     def _memory_path(self) -> Path:
@@ -421,6 +535,29 @@ class WatchTogetherPlugin(Star):
             return self._memory.render(umo=umo, n=3)
         except Exception:  # noqa: BLE001
             return ""
+
+    async def _recall_memory(self, umo: str | None, title: str) -> str:
+        """开场/聊天前读 LivingMemory 里的旧记忆。"""
+
+        if not (self._memory_enabled and self._living.enabled):
+            return ""
+        try:
+            return await self._living.recall_text(title=title, umo=umo, k=4)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[watch-together] 读取 LivingMemory 失败：{exc}")
+            return ""
+
+    async def _remember_living(self, text: str, umo: str | None, title: str) -> None:
+        try:
+            await self._living.remember(
+                text,
+                umo=umo,
+                topics=["一起看电影", title],
+                key_facts=[f"和用户一起看了《{title}》"],
+                importance=0.6,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[watch-together] 写入 LivingMemory 失败：{exc}")
 
     def _remember_session(self, session) -> None:
         if not self._memory_enabled or session is None:
@@ -453,6 +590,17 @@ class WatchTogetherPlugin(Star):
             text += "我说过：" + "；".join(comments[-2:]) + "。"
         if user_lines:
             text += "用户说：" + "；".join(user_lines[-2:]) + "。"
+        # 优先写进 LivingMemory（向量/图谱可检索）；没接上再退回通用桥
+        if self._living.enabled and self._living.engine is not None:
+            scheduled = self._living.remember_soon(
+                text,
+                umo=session.umo or None,
+                topics=["一起看电影", session.title],
+                key_facts=[f"和用户一起看了《{session.title}》"],
+                importance=0.6,
+            )
+            if scheduled:
+                return
         try:
             self._memory_bridge.remember(text, session.umo or "")
         except Exception as exc:  # noqa: BLE001
@@ -488,6 +636,7 @@ class WatchTogetherPlugin(Star):
                 config_getter=lambda: self.config,
                 logger=logger,
                 ffmpeg_path=self._ffmpeg,
+                subtitle_diag=self._subtitle_diag,
             )
             host = str(self.config.get("server_host") or "0.0.0.0")
             port = self._port()
@@ -518,6 +667,9 @@ class WatchTogetherPlugin(Star):
             with contextlib.suppress(RuntimeError):
                 self._loop = asyncio.get_running_loop()
                 self.engine.set_submit(self._submit)
+        if self._loop is not None:
+            self._living.set_submit(self._submit)
+            self._memory_bridge._submit = self._submit
         self.engine.purge()
         return self._start_server()
 

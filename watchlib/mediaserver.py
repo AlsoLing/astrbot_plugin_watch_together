@@ -24,7 +24,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-from .media import MediaItem, find_local_subtitle
+from .media import MediaItem, clean_title, find_local_subtitle
 from .subtitles import decode_subtitle_bytes
 
 __all__ = ["MediaServerClient", "MediaServerSource", "MediaServerError"]
@@ -264,15 +264,18 @@ class MediaServerSource:
         config_getter: Callable[[], Any],
         logger=None,
         find_subtitle: Callable[[Path], tuple[Path | None, str]] = find_local_subtitle,
+        local_items: Callable[[], Any] | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._logger = logger
         self._find_subtitle = find_subtitle
+        self._local_items = local_items
         self._lock = threading.RLock()
         self._items: list[MediaItem] = []
         self._error = ""
         self._updated = 0.0
         self._last_count = 0
+        self._sub_probe_failed: set[str] = set()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -368,6 +371,7 @@ class MediaServerSource:
             self._last_count = len(items)
             self._error = ""
             self._updated = time.time()
+            self._sub_probe_failed.clear()
         return True
 
     def _to_item(self, movie: dict, client: MediaServerClient) -> MediaItem:
@@ -381,11 +385,35 @@ class MediaServerSource:
         exists = bool(mapped) and path.is_file()
 
         subtitle, tag = (None, "")
+        size = 0
+        mtime = time.time()
         if exists:
             try:
                 subtitle, tag = self._find_subtitle(path)
+                stat = path.stat()
+                size, mtime = stat.st_size, stat.st_mtime
             except OSError:
                 subtitle, tag = None, ""
+        else:
+            # 媒体服务器的路径在 NAS 上，插件不一定能直接看到；
+            # 用同名文件在本地片库里兜底，这样字幕/内嵌字幕仍然能读。
+            local = self._match_local(movie, path)
+            if local is not None and local.path and local.path.is_file():
+                path = local.path
+                exists = True
+                subtitle, tag = local.subtitle, local.subtitle_tag
+                if not subtitle:
+                    try:
+                        subtitle, tag = self._find_subtitle(path)
+                    except OSError:
+                        subtitle, tag = None, ""
+                size = local.size
+                mtime = local.mtime
+                if self._logger:
+                    self._logger.info(
+                        f"[watch-together] 媒体服务器条目「{movie.get('title')}」"
+                        f"匹配到本地文件：{path}"
+                    )
 
         container = movie.get("container") or path.suffix.lstrip(".")
         ext = f".{container.lower()}" if container else path.suffix.lower()
@@ -400,8 +428,8 @@ class MediaServerSource:
             rel=path.name or movie.get("title") or "",
             root=client.base,
             ext=ext,
-            size=0,
-            mtime=time.time(),
+            size=size,
+            mtime=mtime,
             subtitle=subtitle,
             subtitle_tag=tag,
             plot=movie.get("overview") or "",
@@ -414,6 +442,42 @@ class MediaServerSource:
             remote_sub_index=movie.get("sub_index"),
             local_path_ok=exists,
         )
+
+    # ------------------------------------------------------------------ 匹配
+    def _match_local(self, movie: dict, remote_path: Path) -> MediaItem | None:
+        """媒体服务器条目 ↔ 本地片库里的同名文件。"""
+
+        provider = self._local_items
+        if provider is None:
+            return None
+        try:
+            items = [item for item in (provider() or []) if getattr(item, "source", "") == "local"]
+        except Exception:  # noqa: BLE001
+            return None
+        if not items:
+            return None
+
+        wanted_name = remote_path.name.lower() if remote_path.name else ""
+        wanted_title = _norm_title(movie.get("title") or "")
+        wanted_year = str(movie.get("year") or "").strip()
+        if not wanted_name and not wanted_title:
+            return None
+
+        best: tuple[int, Any] | None = None
+        for item in items:
+            if not item.path:
+                continue
+            score = None
+            if wanted_name and item.path.name.lower() == wanted_name:
+                score = 0
+            elif wanted_title and _norm_title(item.title) == wanted_title:
+                if not wanted_year or not item.year or str(item.year) == wanted_year:
+                    score = 1
+            if score is None:
+                continue
+            if best is None or score < best[0]:
+                best = (score, item)
+        return best[1] if best else None
 
     # ------------------------------------------------------------------ 读取
     def items(self) -> list[MediaItem]:
@@ -449,9 +513,52 @@ class MediaServerSource:
         }
 
     def fetch_subtitle(self, item: MediaItem) -> str:
-        if item is None or not item.remote_id or item.remote_sub_index is None:
+        """抓媒体服务器上的字幕。
+
+        绿联 / 部分 Emby 变体在片单里不一定给出 Subtitle 流，``remote_sub_index``
+        可能是空的。这里按「已知索引 → 0..7 逐个探测」兜底，拿到像字幕的文本就返回。
+        """
+
+        if item is None or not item.remote_id or item.remote_id in self._sub_probe_failed:
             return ""
         client = self.client()
-        return client.fetch_subtitle(
-            item.remote_id, item.remote_source_id or item.remote_id, int(item.remote_sub_index)
-        )
+        source_id = item.remote_source_id or item.remote_id
+
+        indexes: list[int] = []
+        if item.remote_sub_index is not None:
+            indexes.append(int(item.remote_sub_index))
+        indexes.extend(index for index in range(0, 8) if index not in indexes)
+
+        for index in indexes[:6]:
+            try:
+                text = client.fetch_subtitle(item.remote_id, source_id, index)
+            except MediaServerError as exc:
+                if "鉴权" in str(exc):
+                    raise
+                continue
+            except Exception:  # noqa: BLE001
+                continue
+            if _looks_like_subtitle(text):
+                item.remote_sub_index = index
+                return text
+
+        with self._lock:
+            self._sub_probe_failed.add(item.remote_id)
+        return ""
+
+
+def _looks_like_subtitle(text: str) -> bool:
+    """媒体服务器找不到字幕时经常返回 404 的 HTML/空串，这里做个粗筛。"""
+
+    text = (text or "").strip()
+    if len(text) < 30:
+        return False
+    head = text[:4000]
+    return "-->" in head or "[Script Info]" in head or "WEBVTT" in head
+
+
+def _norm_title(title: str) -> str:
+    """标题归一化：去掉标点/年份/分辨率标签，只留小写字母数字和汉字。"""
+
+    cleaned = clean_title(str(title or ""))
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", cleaned.lower())

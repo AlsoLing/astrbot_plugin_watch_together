@@ -190,10 +190,19 @@
       },
       {
         label: "长期记忆",
-        value: memory.enabled ? `${memory.recent || 0} 条` : "关闭",
+        value: memory.enabled
+          ? memory.livingmemory?.connected
+            ? "LivingMemory 已接上"
+            : `${memory.recent || 0} 条`
+          : "关闭",
         note: memory.enabled
-          ? "看完自动记一笔，开场白会带上"
+          ? memory.livingmemory?.connected
+            ? `读取 ${memory.livingmemory.recalls || 0} 次 · 写入 ${memory.livingmemory.writes || 0} 次`
+            : memory.livingmemory?.error
+              ? `LivingMemory：${memory.livingmemory.error}`
+              : "未检测到 LivingMemory，先用插件自带的本地记忆"
           : "可在插件配置里开启",
+        error: Boolean(memory.livingmemory?.error),
       },
     ];
 

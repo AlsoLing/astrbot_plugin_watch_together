@@ -80,6 +80,8 @@ class WatchSession:
     cues_loading: bool = False
     cues_tried: bool = False
     memory_hint: str = ""
+    memory_tries: int = 0
+    subtitle_note: str = ""
 
     def info(self) -> dict:
         return {
@@ -115,6 +117,7 @@ class WatchEngine:
         ffmpeg_ok: bool = False,
         subtitle_fetcher: Callable[[Any], Awaitable[str]] | None = None,
         memory_provider: Callable[[str | None, str], str] | None = None,
+        memory_recaller: Callable[[str | None, str], Awaitable[str]] | None = None,
         on_session_end: Callable[["WatchSession"], None] | None = None,
     ) -> None:
         self.library = library
@@ -126,6 +129,7 @@ class WatchEngine:
         self.ffmpeg_ok = ffmpeg_ok
         self.subtitle_fetcher = subtitle_fetcher
         self.memory_provider = memory_provider
+        self.memory_recaller = memory_recaller
         self.on_session_end = on_session_end
         self._lock = threading.RLock()
         self._sessions: dict[str, WatchSession] = {}
@@ -205,11 +209,17 @@ class WatchEngine:
                     else "内嵌字幕"
                 )
                 count = self.attach_subtitle_text(session, text, name)
+                with self._lock:
+                    session.subtitle_note = f"{name}（{count} 条）"
                 if self.logger:
                     self.logger.info(f"[watch-together] 已获取字幕（{count} 条）")
+            else:
+                with self._lock:
+                    session.subtitle_note = "没有找到可读的文本字幕"
         except Exception as exc:  # noqa: BLE001
             with self._lock:
                 session.cues_tried = False
+                session.subtitle_note = f"获取字幕失败：{exc}"
             if self.logger:
                 self.logger.warning(f"[watch-together] 获取字幕失败：{exc}")
         finally:
@@ -218,6 +228,27 @@ class WatchEngine:
 
     def schedule_fetch_subtitles(self, session: WatchSession) -> None:
         self._spawn(self._ensure_cues(session))
+
+    # ------------------------------------------------------------------ 记忆
+    async def _ensure_memory(self, session: WatchSession) -> None:
+        """开场前补一次长期记忆（LivingMemory 是异步的，只能在协程里取）。"""
+
+        if self.memory_recaller is None or session.memory_tries >= 2:
+            return
+        session.memory_tries += 1
+        try:
+            extra = await self.memory_recaller(session.umo, session.title)
+        except Exception as exc:  # noqa: BLE001
+            if self.logger:
+                self.logger.warning(f"[watch-together] 读取长期记忆失败：{exc}")
+            return
+        extra = (extra or "").strip()
+        if not extra:
+            return
+        with self._lock:
+            existing = session.memory_hint.strip()
+            if extra not in existing:
+                session.memory_hint = (existing + "\n" + extra).strip() if existing else extra
 
     # ------------------------------------------------------------------ 会话
     def playback_kind(self, item: MediaItem | None) -> str:
@@ -428,6 +459,7 @@ class WatchEngine:
     async def _generate_ambient(self, session: WatchSession) -> Comment | None:
         try:
             await self._ensure_cues(session)
+            await self._ensure_memory(session)
             with self._lock:
                 if session.ended:
                     return None
@@ -437,6 +469,7 @@ class WatchEngine:
                 frame = self._frame_for(session)
                 duration = session.duration
                 title, plot = session.title, session.plot
+                memories = session.memory_hint
             if not cues and frame is None:
                 return None
             system, user = prompts.ambient_prompt(
@@ -450,6 +483,7 @@ class WatchEngine:
                 bot_name=str(self._cfg("bot_name", "TA") or "TA"),
                 max_chars=int(self._cfg("comment_max_chars", 100) or 100),
                 has_image=frame is not None,
+                memories=memories,
             )
             raw = await self._call_llm(session, system, user, frame)
             text = prompts.clean_reply(raw, int(self._cfg("comment_max_chars", 100) or 100))
@@ -477,6 +511,7 @@ class WatchEngine:
         if not bool(self._cfg("intro_enabled", True)):
             return None
         await self._ensure_cues(session)
+        await self._ensure_memory(session)
         try:
             system, user = prompts.intro_prompt(
                 title=title,
@@ -506,6 +541,7 @@ class WatchEngine:
         if session.ended:
             return ""
         await self._ensure_cues(session)
+        await self._ensure_memory(session)
         self._append(session, user_text, "user", session.position)
         with self._lock:
             position = session.position

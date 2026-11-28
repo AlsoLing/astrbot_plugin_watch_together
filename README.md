@@ -13,10 +13,10 @@
 
 - 🎬 **片库点播**：扫描 NAS 上的电影目录，网页里点一下就开始放（mp4 / webm 原生支持）。
 - ☁️ **媒体服务器直连**：可连 Jellyfin / Emby，直接读它的片单、海报、简介和字幕。
-- 🎞 **内嵌字幕**：MKV/MP4 里封装的字幕轨用 ffmpeg 自动提取，不用再找外挂字幕。
+- 🎞 **内嵌字幕**：MKV/MP4 里封装的字幕轨自动提取；装了 ffmpeg 用 ffmpeg，没装也能用内置解析器读文本字幕。
 - 📡 **局域网播放识别**：轮询 Jellyfin/Emby 的「正在播放」或 VLC Web 界面，自动跟着进度点评。
-- 🧠 **长期记忆**：看完自动记一笔（片名、进度、聊过的话），下次开场白会带上；
-  还能写进记忆插件（默认适配 `astrbot_plugin_sugarmemory_clean`）或 webhook。
+- 🧠 **长期记忆串联**：直接接上 [LivingMemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory)，
+  开场前读旧记忆、散场后写新记忆；没装时退回插件自带的本地观影记忆。
 - 🧠 **AI 真的在"看"**：把刚刚的台词（SRT / ASS / VTT 自动解析）和播放进度交给模型；
   开启画面理解后每 20 秒截一帧低清画面，让它点评镜头、表情、构图。
 - 💬 **字幕式弹幕**：点评像字幕一样浮在画面下方，同时记在右侧「观影笔记」里，点时间戳就能跳回。
@@ -91,13 +91,14 @@ astrbot_plugin_watch_together/
 | `media_server_username` / `media_server_password` | 没有 API Key 时用账号密码登录（Emby / 绿联媒体服务器通常只给账号密码）。 |
 | `media_server_path_map` | 媒体服务器路径 → 容器路径，例如 `/volume1/影视中心:/media`。 |
 | `media_server_refresh` | 片单刷新间隔，默认 300 秒。 |
-| `embedded_subtitles` | 是否提取内嵌字幕（需要 ffmpeg/ffprobe），默认开。 |
+| `embedded_subtitles` | 是否提取内嵌字幕（ffmpeg 或内置解析器），默认开。 |
 | `auto_watch_enabled` | 自动识别局域网播放（Jellyfin/Emby 会话、VLC），默认关。 |
 | `auto_watch_interval` | 播放检测间隔，默认 10 秒。 |
 | `auto_watch_umo` | 自动识别时把点评推到哪个会话（可选）。 |
 | `vlc_url` | VLC Web 界面地址，例如 `http://192.168.1.20:8080`。 |
 | `memory_enabled` | 长期记忆开关，默认开。 |
-| `memory_plugin` | 要适配的记忆插件名，默认 `astrbot_plugin_sugarmemory_clean`。 |
+| `livingmemory_mode` | `auto`（默认，自动串联 LivingMemory）/ `off`（只用本地记忆）。 |
+| `memory_plugin` | 其它记忆插件的名字，默认 `astrbot_plugin_sugarmemory_clean`。 |
 | `memory_webhook` | 可选，把观影摘要 POST 到外部地址。 |
 
 ### Docker 挂载
@@ -191,14 +192,20 @@ AI 的点评、字幕、聊天功能都一样，只是没有海报墙。
 
 ## 内嵌字幕
 
-很多 MKV/MP4 把字幕作为轨道封装在文件里。插件找不到外挂字幕时，会用 ffmpeg：
+很多 MKV/MP4 把字幕作为轨道封装在文件里，播放器能显示，但浏览器 `<video>` 读不到。
+插件会在没找到外挂字幕时自己提取：
 
-1. `ffprobe` 列出字幕流（语言、编码、默认/forced）；
-2. 优先中文、非 forced、文本编码；
-3. `ffmpeg -map 0:<index> -c:s srt` 转成 SRT，喂给 AI，同时给播放器做字幕轨。
+1. 装了 ffmpeg：`ffprobe` 列字幕流 → 优先中文、非 forced、文本编码 → `ffmpeg -c:s srt`；
+2. 没装 ffmpeg：用内置的纯 Python 解析器直接读 MKV（SRT/ASS/SSA/WebVTT 文本轨）
+   和 MP4（`mov_text`）里的字幕，不依赖任何外部程序；
+3. 绿联 / Emby 的片单里没给字幕流时，会按索引 0–7 逐个向媒体服务器请求，拿到文本就用。
 
-前提：能找到 `ffmpeg`（`ffmpeg_path`），并且 `embedded_subtitles` 打开。
-**位图字幕（PGS / VobSub）不能转文本**，会跳过——这种只能靠「画面理解」或外挂字幕。
+**位图字幕（PGS / VobSub / DVB）不能转文本**——那是图片，浏览器和 AI 都读不了。
+这种会明确提示，想看只能：用绿联影视中心 / VLC 播放（它们能渲染图片字幕），
+或手动上传一份 srt，或让媒体服务器转成文本字幕。
+
+> 网页里没字幕时，点「字幕诊断」会列出：外挂字幕找到没有、内嵌轨是什么编码、
+> 是不是位图字幕、媒体服务器有没有给字幕。比瞎猜快。
 
 ## 局域网自动识别
 
@@ -215,21 +222,35 @@ AI 的点评、字幕、聊天功能都一样，只是没有海报墙。
 
 ## 长期记忆
 
-默认开启，数据存在插件数据目录的 `watch_memory.json`，只记录：
+两部分，默认都开：
 
-- 片名、看到的时间点；
-- AI 说过的最后两句、你说过的最后两句；
-- 时间与会话标识。
+**1. 插件自带的本地记忆**（`watch_memory.json`）
 
-下次开场白和聊天时会把最近 3 条带进提示词（"你们之前一起看过…"）。
+只记录片名、看到的时间点、AI 和你说过的最后几句话。下次开场白和聊天时会带上最近 3 条
+（"你们之前一起看过…"）。不依赖任何其它插件。
 
-**适配记忆插件**：如果 `astrbot_plugin_sugarmemory_clean` 这类插件在运行时暴露了
-`add_memory / save_memory / store_memory / remember` 之类的方法，插件会把观影摘要写进去。
-启动日志会打印 `[watch-together] 记忆插件接口：[...]`；如果显示"未发现"，说明接口名不同，
-把那一行日志或插件代码发我，我再按实际接口适配。
+**2. 串联 LivingMemory**（推荐）
 
-也可以用 `memory_webhook`：填一个 URL，插件会把
-`{"content": "...", "umo": "...", "source": "watch_together"}` POST 过去，方便接自建服务。
+装了 [astrbot_plugin_livingmemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory)
+的话，插件会自动找到同进程里它的记忆引擎（`MemoryEngine`），直接读写：
+
+- **开场前读**：用片名 + "一起看电影 观影 剧情 偏好" 做语义检索，把相关旧记忆塞进开场白和聊天提示词；
+- **散场后写**：把"和用户一起看了《X》，看到几分几秒，我说过…你说过…"写成一条长期记忆，
+  带 `topics`（一起看电影、片名）和 `key_facts`，importance 0.6；
+- 写入的 `session_id` 就是当前会话的 `umo`，所以它在聊天里也能被正常召回。
+
+不需要改 LivingMemory 的配置，也不走它的外部 HTTP API。日志里会看到：
+
+```
+[watch-together] 已接上 LivingMemory 长期记忆（LivingMemoryPlugin.initializer.memory_engine）
+[watch-together] 已写入长期记忆（id=123）：和用户一起看了《让子弹飞》…
+```
+
+没装、还没初始化完、或版本接口对不上时，会安静跳过并退回本地记忆，不会影响看片。
+想关掉只保留本地记忆：`livingmemory_mode = off`。
+
+**其它记忆插件 / 自建服务**：`memory_plugin` 会尝试 `add_memory / save_memory / store_memory / remember`
+这类方法；`memory_webhook` 则把 `{"content","umo","source"}` POST 到你的地址。
 
 ---
 
@@ -270,17 +291,34 @@ AI 的点评、字幕、聊天功能都一样，只是没有海报墙。
 
 ### 字幕没被识别？
 
-找字幕规则：同目录 `影片名.srt / .ass / .vtt`，`影片名.zh-CN.srt` 这类带语言后缀，
-或同目录 `Subs/`、`字幕/` 子文件夹。中文编码（GBK/GB18030）会自动识别。
-媒体服务器片源如果本地路径不可读，会尝试从服务器下载字幕流；本地文件模式可以手动「加载字幕」。
+**先点网页里的「字幕诊断」**，它会告诉你是哪一种情况。常见原因：
 
-**内嵌字幕**需要 ffmpeg/ffprobe：
+1. **外挂字幕名字对不上**：插件认 `影片名.srt`、`影片名.chs.srt`、`影片名_chs.srt`、
+   `影片名-简体.srt`，也会看 `Subs/`、`字幕/` 子文件夹；目录里只有一部片子时，
+   名字完全对不上的字幕也会被采用。中文编码（GBK/GB18030）自动识别。
+2. **内嵌字幕但没装 ffmpeg**：从 v1.3 起会退回内置的纯 Python 解析器，直接读 MKV 的
+   SRT/ASS/SSA/WebVTT 文本轨和 MP4 的 `mov_text`，不需要 ffmpeg。
+3. **位图字幕（PGS / VobSub / DVB）**：这是图片，转不成文本。绿联影视中心、VLC 能渲染，
+   浏览器 `<video>` 和 AI 都读不了。三条出路：用外部播放器看（插件只跟着计时点评）、
+   手动上传一份 srt、或在媒体服务器里转成文本字幕。
+4. **媒体服务器片源**：片单里没给字幕流时会按索引 0–7 逐个向服务器要，拿到文本就用；
+   NAS 上看不到原始文件时，还会用本地片库里同名/同标题的文件兜底。
+5. **硬字幕**（烧进画面的）：本来就没有字幕轨，只能靠「画面理解」。
 
-```bash
-ffmpeg -version && ffprobe -version
-```
+还是不行的话，`/观影 状态` 会显示字幕状态，日志里也有 `[watch-together] 已获取字幕（N 条）`。
 
-装好后把 `embedded_subtitles` 保持开启即可；位图字幕（PGS）无解，只能开画面理解。
+### 记忆插件没生效？
+
+装了 LivingMemory 的话，看启动日志：
+
+- `[watch-together] 已接上 LivingMemory 长期记忆（...）`：接上了；
+- `[watch-together] 已写入长期记忆（id=...）`：散场后写入成功；
+- 什么都没有：说明当时 LivingMemory 还没初始化完（它是异步启动的，插件会每 20 秒重试一次），
+  或者你把 `livingmemory_mode` 设成了 `off`。
+
+WebUI「观影室」的「长期记忆」卡片会显示 `LivingMemory 已接上` 和读写次数。
+用其它记忆插件时看 `[watch-together] 记忆插件接口：[...]`；显示"未发现"就说明方法名不在
+`add_memory / save_memory / store_memory / remember` 里，可以先用 `memory_webhook` 兜底。
 
 ### 为什么识别不到我的播放器？
 
@@ -291,14 +329,6 @@ ffmpeg -version && ffprobe -version
 
 PotPlayer、Windows 自带播放器、MP4 双击打开这类没有接口，插件拿不到进度，
 只能用网页里的「用外部播放器」手动点「开始同步」。
-
-### 记忆插件没生效？
-
-看启动日志里的 `[watch-together] 记忆插件接口：[...]`：
-
-- 有内容：说明已经找到保存方法，看完一场就会写入；
-- `未发现`：说明插件的保存方法名不在 `add_memory / save_memory / store_memory / remember` 里，
-  把它 `main.py` 里保存记忆的函数名发我，或先用 `memory_webhook` 兜底。
 
 ### 会不会剧透？
 

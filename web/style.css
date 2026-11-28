@@ -693,6 +693,22 @@ input {
   flex-shrink: 0;
 }
 
+/* 字幕诊断 */
+.subtitle-tip {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px dashed var(--line);
+  background: var(--panel);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--dim);
+}
+
+.subtitle-tip div + div {
+  margin-top: 4px;
+}
+
 /* ---------------------------------------------------------------- 笔记 */
 .notes-list {
   flex: 1;

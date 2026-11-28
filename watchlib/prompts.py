@@ -63,6 +63,7 @@ def ambient_prompt(
     bot_name: str = "TA",
     max_chars: int = 100,
     has_image: bool = False,
+    memories: str = "",
 ) -> tuple[str, str]:
     """生成"顺口点评一句"的提示词。返回 (system, user)。"""
 
@@ -84,6 +85,9 @@ def ambient_prompt(
     history_block = _history_block(history)
     if history_block:
         parts.append(history_block)
+    memory_block = _memory_block(memories)
+    if memory_block:
+        parts.append(memory_block)
     if has_image:
         parts.append("附图是此刻的画面截图。可以结合画面里的人物表情、动作、场景、光线、构图来说一句。")
     else:

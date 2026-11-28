@@ -28,9 +28,9 @@ from .ffmpeg import build_command
 
 __all__ = ["ServerContext", "WatchHTTPServer", "start_server", "stop_server"]
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 CHUNK = 256 * 1024
-SESSION_ROUTE = re.compile(r"^/api/session/([0-9a-fA-F]{6,32})(?:/([a-zA-Z.]+))?$")
+SESSION_ROUTE = re.compile(r"^/api/session/([0-9a-fA-F]{6,32})(?:/([a-zA-Z.-]+))?$")
 STREAM_ROUTE = re.compile(r"^/api/stream/([0-9a-fA-F]{6,32})$")
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
@@ -62,12 +62,14 @@ class ServerContext:
         config_getter: Callable[[], Any],
         logger=None,
         ffmpeg_path: str | None = None,
+        subtitle_diag: Callable[[Any], dict] | None = None,
     ) -> None:
         self.engine = engine
         self.web_dir = Path(web_dir)
         self._config_getter = config_getter
         self.logger = logger
         self.ffmpeg = ffmpeg_path
+        self.subtitle_diag = subtitle_diag
         self.started_at = time.time()
         self._lock = threading.Lock()
         self._procs: set[subprocess.Popen] = set()
@@ -314,6 +316,8 @@ class WatchHandler(BaseHTTPRequestHandler):
                 return self._send_json(self.ctx.engine.events(session_id, after_id))
             if action in ("subtitles.vtt", "subtitle.vtt"):
                 return self._serve_vtt(session_id, query)
+            if action == "subtitle-info":
+                return self._subtitle_info(session_id)
             if action == "stream":
                 return self._serve_stream(session_id, query)
 
@@ -428,7 +432,31 @@ class WatchHandler(BaseHTTPRequestHandler):
             return self._send_error_json("session_not_found", 404)
         payload = session.info()
         payload["ok"] = True
+        payload["subtitle_note"] = session.subtitle_note
+        payload["subtitle_info_url"] = f"/api/session/{session.id}/subtitle-info"
         self._send_json(payload)
+
+    def _subtitle_info(self, session_id: str) -> None:
+        session = self.ctx.engine.get(session_id)
+        if session is None:
+            return self._send_error_json("session_not_found", 404)
+        if self.ctx.subtitle_diag is None:
+            return self._send_json(
+                {
+                    "ok": True,
+                    "has_sub": bool(session.cues),
+                    "note": session.subtitle_note,
+                    "hint": "当前版本不支持字幕诊断",
+                    "subtitle_info_url": f"/api/session/{session.id}/subtitle-info",
+                }
+            )
+        try:
+            info = self.ctx.subtitle_diag(session) or {}
+        except Exception as exc:  # noqa: BLE001
+            return self._send_error_json(f"subtitle_diag_failed: {exc}", 500)
+        info.setdefault("ok", True)
+        info["subtitle_info_url"] = f"/api/session/{session.id}/subtitle-info"
+        self._send_json(info)
 
     def _require_session(self, session_id: str) -> WatchSession | None:
         session = self.ctx.engine.get(session_id)
