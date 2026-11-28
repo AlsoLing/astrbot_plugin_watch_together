@@ -4,21 +4,23 @@ short_desc: 和 AI 一起看电影：它读字幕、看画面，边看边吐槽�
 desc: |
   AstrBot 装在 NAS 上，人在电脑前看电影——这个插件把两边接起来。
 
-  插件会在 NAS 上开一间 HTTP 观影室（默认 6199 端口），电脑浏览器打开就能点播
+  插件会在 NAS 上开一间 HTTP 观影室（默认 6116 端口），电脑浏览器打开就能点播
   NAS 里的影片；AI 通过同名字幕（可选再加一帧画面截图）理解剧情，按你设置的节奏说一两句
   点评，以字幕/弹幕的形式浮在画面上，同时可以推送到 QQ / Telegram 等聊天窗口。
   看电影时直接在聊天里说话，AI 会接着当前剧情回应你。
 
   功能：
   - 片库扫描：自动识别 SRT / ASS / VTT 字幕与 Emby/Jellyfin 的 nfo 简介
+  - 内嵌字幕：用 ffmpeg 提取 MKV/MP4 里封装的字幕轨（需要 ffmpeg）
   - 媒体服务器：可直连 Jellyfin / Emby，读片单、海报、简介和字幕
+  - 局域网识别：轮询 Jellyfin/Emby 正在播放会话或 VLC Web 界面，自动跟着进度点评
   - 三种看法：NAS 点播（mp4/webm）、打开电脑本地文件、外部播放器同步计时
   - WebUI 页面：在「扩展功能 → 观影室」里浏览片库、看状态、一键开播
   - AI 点评：字幕上下文 + 可选画面截图，控制频率、避免剧透和重复
-  - 聊天桥接：观影期间的消息自动带上"一起看电影"的上下文
+  - 长期记忆：看完自动记一笔，下次开场白带上；可写入记忆插件或 webhook
   - 零额外依赖：只用 Python 标准库；MKV 等格式可选 ffmpeg 实时转封装
-version: 1.1.0
-author: 观影小队
+version: 1.2.1
+author: AlsoLing
 repo: https://github.com/your-name/astrbot_plugin_watch_together
 astrbot_version: ">=4.5.7"
 views:

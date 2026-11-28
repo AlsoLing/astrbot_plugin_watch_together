@@ -377,11 +377,10 @@
 
     await primeHistory();
     startTimers();
-    if (info.playback === "remote") {
-      if (!info.has_sub) {
-        api(`/api/session/${info.id}/fetch-subtitle`, { method: "POST" }).catch(() => {});
-        setTimeout(refreshSubtitleState, 4000);
-      }
+    if (!info.has_sub) {
+      api(`/api/session/${info.id}/fetch-subtitle`, { method: "POST" }).catch(() => {});
+      setTimeout(refreshSubtitleState, 2500);
+      setTimeout(refreshSubtitleState, 6000);
     }
   }
 
@@ -395,7 +394,7 @@
         session.subtitle = info.subtitle || "媒体服务器字幕";
         setupTrack(state.baseOffset);
         el.nowMeta.textContent = metaLine(session);
-        toast("字幕已从媒体服务器加载");
+        toast("字幕已加载（内嵌/媒体服务器）");
       }
     } catch (err) {
       /* ignore */

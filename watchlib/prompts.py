@@ -93,6 +93,13 @@ def ambient_prompt(
     return system, "\n\n".join(part for part in parts if part)
 
 
+def _memory_block(memories: str) -> str:
+    memories = (memories or "").strip()
+    if not memories:
+        return ""
+    return f"你们之前一起看片的记忆（可以自然带出来，别生硬背诵）：\n{memories[:1500]}"
+
+
 def chat_prompt(
     *,
     title: str,
@@ -105,6 +112,7 @@ def chat_prompt(
     bot_name: str = "TA",
     user_text: str,
     has_image: bool = False,
+    memories: str = "",
 ) -> tuple[str, str]:
     """用户在观影途中插话时的提示词。"""
 
@@ -126,6 +134,9 @@ def chat_prompt(
     history_block = _history_block(history)
     if history_block:
         parts.append(history_block)
+    memory_block = _memory_block(memories)
+    if memory_block:
+        parts.append(memory_block)
     if has_image:
         parts.append("附图是此刻的画面截图。")
     parts.append(f"用户刚刚对你说：{user_text.strip()[:500]}")
@@ -139,6 +150,7 @@ def intro_prompt(
     plot: str,
     persona: str = "",
     bot_name: str = "TA",
+    memories: str = "",
 ) -> tuple[str, str]:
     """电影刚开始时的开场白。"""
 
@@ -147,7 +159,11 @@ def intro_prompt(
         system += f"\n\n你的人格设定（优先遵循）：\n{persona.strip()[:1200]}"
     system += "\n\n现在是片头刚放起来，说一句开场白：1~2 句，别念简介，别剧透。"
 
-    parts = [f"电影：《{title}》", _plot_line(plot), "片头开始了，随便说一句，像是在沙发上坐好准备看片："]
+    parts = [f"电影：《{title}》", _plot_line(plot)]
+    memory_block = _memory_block(memories)
+    if memory_block:
+        parts.append(memory_block)
+    parts.append("片头开始了，随便说一句，像是在沙发上坐好准备看片：")
     return system, "\n\n".join(part for part in parts if part)
 
 

@@ -189,6 +189,14 @@ class MediaServerClient:
             raise MediaServerError("片单格式不对（可能是非 Jellyfin/Emby 服务）")
         return [self._map_item(item) for item in items if isinstance(item, dict)]
 
+    def active_sessions(self) -> list[dict]:
+        """正在播放的客户端会话（Jellyfin / Emby 的 /Sessions）。"""
+
+        data = self._request("/Sessions")
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
     @staticmethod
     def _map_item(item: dict) -> dict:
         sources = item.get("MediaSources") or []

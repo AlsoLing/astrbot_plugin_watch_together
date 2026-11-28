@@ -78,6 +78,8 @@ class WatchSession:
     ended: bool = False
     stream_offset: float = 0.0
     cues_loading: bool = False
+    cues_tried: bool = False
+    memory_hint: str = ""
 
     def info(self) -> dict:
         return {
@@ -112,6 +114,8 @@ class WatchEngine:
         submit: Callable[[Awaitable[Any]], Any] | None = None,
         ffmpeg_ok: bool = False,
         subtitle_fetcher: Callable[[Any], Awaitable[str]] | None = None,
+        memory_provider: Callable[[str | None, str], str] | None = None,
+        on_session_end: Callable[["WatchSession"], None] | None = None,
     ) -> None:
         self.library = library
         self._config_getter = config_getter
@@ -121,6 +125,8 @@ class WatchEngine:
         self._submit = submit
         self.ffmpeg_ok = ffmpeg_ok
         self.subtitle_fetcher = subtitle_fetcher
+        self.memory_provider = memory_provider
+        self.on_session_end = on_session_end
         self._lock = threading.RLock()
         self._sessions: dict[str, WatchSession] = {}
         self._subtitle_cache: dict[str, tuple[float, list[Cue]]] = {}
@@ -181,25 +187,31 @@ class WatchEngine:
         return len(cues)
 
     async def _ensure_cues(self, session: WatchSession) -> None:
-        """媒体服务器来源、本地又没有字幕文件时，按需下载一次字幕文本。"""
+        """本地没有外挂字幕时，按需提取内嵌字幕或从媒体服务器下载一次。"""
 
-        if session.cues or session.item is None:
-            return
-        if session.item.remote_sub_index is None or self.subtitle_fetcher is None:
+        if session.cues or session.item is None or self.subtitle_fetcher is None:
             return
         with self._lock:
-            if session.cues_loading:
+            if session.cues_loading or session.cues_tried:
                 return
             session.cues_loading = True
+            session.cues_tried = True
         try:
             text = await self.subtitle_fetcher(session.item)
             if text:
-                count = self.attach_subtitle_text(session, text, "媒体服务器字幕")
+                name = (
+                    "媒体服务器字幕"
+                    if session.item is not None and session.item.remote_sub_index is not None
+                    else "内嵌字幕"
+                )
+                count = self.attach_subtitle_text(session, text, name)
                 if self.logger:
-                    self.logger.info(f"[watch-together] 已从媒体服务器获取字幕（{count} 条）")
+                    self.logger.info(f"[watch-together] 已获取字幕（{count} 条）")
         except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                session.cues_tried = False
             if self.logger:
-                self.logger.warning(f"[watch-together] 获取媒体服务器字幕失败：{exc}")
+                self.logger.warning(f"[watch-together] 获取字幕失败：{exc}")
         finally:
             with self._lock:
                 session.cues_loading = False
@@ -255,6 +267,12 @@ class WatchEngine:
             "interval": int(self._cfg("comment_interval", 90) or 90),
             "vision": bool(self._cfg("vision_enabled", True)),
         }
+        if self.memory_provider is not None:
+            try:
+                session.memory_hint = self.memory_provider(umo, session.title) or ""
+            except Exception as exc:  # noqa: BLE001
+                if self.logger:
+                    self.logger.warning(f"[watch-together] 读取长期记忆失败：{exc}")
         with self._lock:
             self._sessions[session.id] = session
         return session
@@ -277,6 +295,7 @@ class WatchEngine:
             return list(self._sessions.values())
 
     def close(self, session_id: str) -> bool:
+        session = None
         with self._lock:
             session = self._sessions.get(session_id)
             if not session:
@@ -284,13 +303,29 @@ class WatchEngine:
             session.ended = True
             session.playing = False
             session.updated_at = time.time()
-            return True
+        if self.on_session_end is not None:
+            try:
+                self.on_session_end(session)
+            except Exception as exc:  # noqa: BLE001
+                if self.logger:
+                    self.logger.warning(f"[watch-together] 写入观影记忆失败：{exc}")
+        return True
 
     def close_all(self) -> None:
         with self._lock:
-            for session in self._sessions.values():
+            sessions = list(self._sessions.values())
+            for session in sessions:
                 session.ended = True
-        self._sessions.clear()
+                session.playing = False
+            self._sessions.clear()
+        if self.on_session_end is not None:
+            for session in sessions:
+                if not session.comments:
+                    continue
+                try:
+                    self.on_session_end(session)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def purge(self, max_idle: int = 1800) -> None:
         now = time.time()
@@ -448,6 +483,7 @@ class WatchEngine:
                 plot=plot,
                 persona=str(self._cfg("persona_prompt", "") or ""),
                 bot_name=str(self._cfg("bot_name", "TA") or "TA"),
+                memories=session.memory_hint,
             )
             raw = await self._call_llm(session, system, user, None)
             text = prompts.clean_reply(raw, 120)
@@ -491,6 +527,7 @@ class WatchEngine:
                 bot_name=str(self._cfg("bot_name", "TA") or "TA"),
                 user_text=user_text,
                 has_image=frame is not None,
+                memories=session.memory_hint,
             )
             raw = await self._call_llm(session, system, user, frame)
             text = prompts.clean_reply(raw, 300) or "（想了想，没说话）"

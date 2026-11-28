@@ -83,8 +83,8 @@
   "server_port": {
     "description": "观影室端口",
     "type": "int",
-    "default": 6199,
-    "hint": "电脑浏览器访问的端口。Docker 部署需要把该端口映射出来，例如 -p 6199:6199。"
+    "default": 6116,
+    "hint": "电脑浏览器访问的端口。Docker 部署需要把该端口映射出来，例如 -p 6116:6116。"
   },
   "public_host": {
     "description": "对外地址（可选）",
@@ -165,5 +165,54 @@
     "description": "媒体服务器超时（秒）",
     "type": "int",
     "default": 8
+  },
+  "embedded_subtitles": {
+    "description": "读取内嵌字幕",
+    "type": "bool",
+    "default": true,
+    "hint": "MKV/MP4 里封装的字幕轨道会用 ffmpeg 提取成 SRT（需要 ffmpeg/ffprobe）。位图字幕（PGS）无法转文本。"
+  },
+  "auto_watch_enabled": {
+    "description": "自动识别局域网播放",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后轮询 Jellyfin/Emby 的「正在播放」会话和 VLC 的 Web 界面，自动跟着进度点评。"
+  },
+  "auto_watch_interval": {
+    "description": "播放检测间隔（秒）",
+    "type": "int",
+    "default": 10,
+    "slider": { "min": 5, "max": 60, "step": 5 }
+  },
+  "auto_watch_umo": {
+    "description": "自动识别时推送到哪个会话",
+    "type": "string",
+    "default": "",
+    "_special": "umo",
+    "hint": "可选。不填只写在网页/本地记忆里，不往聊天推。"
+  },
+  "vlc_url": {
+    "description": "VLC Web 界面地址（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "电脑上的 VLC 开启「视图 → 界面 → 主界面 → Web」后填 http://192.168.1.20:8080；有密码就写 http://user:pass@ip:8080。"
+  },
+  "memory_enabled": {
+    "description": "长期记忆",
+    "type": "bool",
+    "default": true,
+    "hint": "看完自动记一笔（片名、进度、聊过的话），下次开场白会带上；同时尝试写入记忆插件。"
+  },
+  "memory_plugin": {
+    "description": "要适配的记忆插件",
+    "type": "string",
+    "default": "astrbot_plugin_sugarmemory_clean",
+    "hint": "插件名。会尝试调用它的 add_memory / save_memory / remember 等方法；启动日志会列出发现的接口。"
+  },
+  "memory_webhook": {
+    "description": "记忆 Webhook（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "填了就把观影摘要 POST 到该地址（JSON: content/umo/source），优先级高于插件桥。"
   }
 }

@@ -28,7 +28,7 @@ from .ffmpeg import build_command
 
 __all__ = ["ServerContext", "WatchHTTPServer", "start_server", "stop_server"]
 
-VERSION = "1.1.0"
+VERSION = "1.2.1"
 CHUNK = 256 * 1024
 SESSION_ROUTE = re.compile(r"^/api/session/([0-9a-fA-F]{6,32})(?:/([a-zA-Z.]+))?$")
 STREAM_ROUTE = re.compile(r"^/api/stream/([0-9a-fA-F]{6,32})$")

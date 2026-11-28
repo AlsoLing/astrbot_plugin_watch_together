@@ -90,7 +90,7 @@
 
   // ------------------------------------------------------------------ 地址
   function playerUrl(path = "/") {
-    const port = state.status?.port || 6199;
+    const port = state.status?.port || 6116;
     let host = location.hostname || "127.0.0.1";
     let usePort = port;
     const base = state.status?.server?.base_url || "";
@@ -129,6 +129,8 @@
     const server = data.server || {};
     const library = data.library || {};
     const ms = data.media_server || {};
+    const watcher = data.watcher || {};
+    const memory = data.memory || {};
     const sessions = data.sessions || [];
 
     el.subtitle.textContent = `v${data.version || ""} · 观影室 ${
@@ -171,6 +173,27 @@
               sessions[0].playing ? " · 播放中" : " · 暂停"
             }`
           : "在下方点「一起看」即可开一场",
+      },
+      {
+        label: "自动识别",
+        value: watcher.enabled
+          ? (watcher.playing || []).length
+            ? `${watcher.playing.length} 个设备在播`
+            : "待机"
+          : "未启用",
+        note: watcher.error
+          ? watcher.error
+          : (watcher.playing || [])[0]
+            ? `${watcher.playing[0].device} · ${watcher.playing[0].title}`
+            : "Jellyfin / Emby 会话或 VLC Web 界面",
+        error: Boolean(watcher.error),
+      },
+      {
+        label: "长期记忆",
+        value: memory.enabled ? `${memory.recent || 0} 条` : "关闭",
+        note: memory.enabled
+          ? "看完自动记一笔，开场白会带上"
+          : "可在插件配置里开启",
       },
     ];
 

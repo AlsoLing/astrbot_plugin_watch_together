@@ -76,6 +76,9 @@ _ffmpeg_mod = importlib.import_module(f"{_LIB}.ffmpeg")
 _media_mod = importlib.import_module(f"{_LIB}.media")
 _server_mod = importlib.import_module(f"{_LIB}.server")
 _mediaserver_mod = importlib.import_module(f"{_LIB}.mediaserver")
+_embedded_mod = importlib.import_module(f"{_LIB}.embedded")
+_memory_mod = importlib.import_module(f"{_LIB}.memory")
+_players_mod = importlib.import_module(f"{_LIB}.players")
 _subtitles_mod = importlib.import_module(f"{_LIB}.subtitles")
 
 WatchEngine = _engine_mod.WatchEngine
@@ -87,10 +90,14 @@ start_server = _server_mod.start_server
 stop_server = _server_mod.stop_server
 MediaServerSource = _mediaserver_mod.MediaServerSource
 MediaServerError = _mediaserver_mod.MediaServerError
+embedded_extract = _embedded_mod.extract_for
+WatchMemory = _memory_mod.WatchMemory
+MemoryBridge = _memory_mod.MemoryBridge
+PlayerWatcher = _players_mod.PlayerWatcher
 format_timestamp = _subtitles_mod.format_timestamp
 
 PLUGIN_NAME = "astrbot_plugin_watch_together"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.1"
 
 # Dashboard 可视化视图用的辅助模块（老版本 AstrBot 可能没有）
 try:
@@ -129,7 +136,7 @@ def detect_lan_ip() -> str:
         sock.close()
 
 
-@register(PLUGIN_NAME, "观影小队", "和 AI 一起看电影：AI 读字幕/看画面，实时吐槽解说", PLUGIN_VERSION)
+@register(PLUGIN_NAME, "AlsoLing", "和 AI 一起看电影：AI 读字幕/看画面，实时吐槽解说", PLUGIN_VERSION)
 class WatchTogetherPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -148,6 +155,25 @@ class WatchTogetherPlugin(Star):
         self._media_server = MediaServerSource(_ConfigView(self.config), logger=logger)
         self._media_server.start()
 
+        # 长期记忆：本地观影记忆 + 外接记忆插件
+        self._memory_enabled = bool(self.config.get("memory_enabled", True))
+        self._memory = WatchMemory(self._memory_path())
+        self._memory_bridge = MemoryBridge(
+            self.context,
+            plugin_name=str(self.config.get("memory_plugin") or "astrbot_plugin_sugarmemory_clean"),
+            logger=logger,
+            submit=self._submit if self._loop else None,
+            webhook=str(self.config.get("memory_webhook") or ""),
+        )
+        if self._memory_enabled:
+            try:
+                found = self._memory_bridge.discover()
+                logger.info(
+                    f"[watch-together] 记忆插件接口：{found or '未发现（只使用本地观影记忆）'}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[watch-together] 探测记忆插件失败：{exc}")
+
         self.engine = WatchEngine(
             library=MediaLibrary(
                 self._media_dirs,
@@ -161,8 +187,14 @@ class WatchTogetherPlugin(Star):
             logger=logger,
             submit=self._submit if self._loop else None,
             ffmpeg_ok=bool(self._ffmpeg),
-            subtitle_fetcher=self._fetch_remote_subtitle,
+            subtitle_fetcher=self._fetch_subtitle,
+            memory_provider=self._memory_context,
+            on_session_end=self._remember_session,
         )
+        self._watcher = PlayerWatcher(
+            self.engine, self._media_server, lambda: self.config, logger=logger
+        )
+        self._watcher.start()
         self._server = None
         self._thread: threading.Thread | None = None
         self._ctx: ServerContext | None = None
@@ -188,9 +220,9 @@ class WatchTogetherPlugin(Star):
 
     def _port(self) -> int:
         try:
-            return int(self.config.get("server_port") or 6199)
+            return int(self.config.get("server_port") or 6116)
         except (TypeError, ValueError):
-            return 6199
+            return 6116
 
     def _host_for_url(self) -> str:
         configured = str(self.config.get("public_host") or "").strip()
@@ -257,6 +289,11 @@ class WatchTogetherPlugin(Star):
                 "errors": library.errors()[:6],
             },
             "media_server": self._media_server.status(),
+            "watcher": self._watcher.status() if self._watcher else {},
+            "memory": {
+                "enabled": self._memory_enabled,
+                "recent": len(self._memory.recent(n=100)) if self._memory else 0,
+            },
             "sessions": [
                 {
                     "id": s.id,
@@ -345,10 +382,81 @@ class WatchTogetherPlugin(Star):
     async def _api_test_media_server(self):
         return json_response(await asyncio.to_thread(self._view_test_media_server))
 
-    async def _fetch_remote_subtitle(self, item) -> str:
-        if self._media_server is None:
+    async def _fetch_subtitle(self, item) -> str:
+        """外挂字幕 → 媒体服务器字幕 → 内嵌软字幕，逐级兜底。"""
+
+        if item is None:
             return ""
-        return await asyncio.to_thread(self._media_server.fetch_subtitle, item)
+        if item.remote_sub_index is not None and self._media_server is not None:
+            try:
+                text = await asyncio.to_thread(self._media_server.fetch_subtitle, item)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[watch-together] 媒体服务器字幕下载失败：{exc}")
+            else:
+                if text:
+                    return text
+        if (
+            bool(self.config.get("embedded_subtitles", True))
+            and self._ffmpeg
+            and item.path
+            and item.path.is_file()
+        ):
+            return await asyncio.to_thread(embedded_extract, item.path, self._ffmpeg)
+        return ""
+
+    # ------------------------------------------------------------------ 长期记忆
+    def _memory_path(self) -> Path:
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+            base = Path(get_astrbot_plugin_data_path())
+        except Exception:  # noqa: BLE001 - 老版本没有这个工具函数
+            base = Path.home() / ".astrbot_plugin_data"
+        return base / PLUGIN_NAME / "watch_memory.json"
+
+    def _memory_context(self, umo: str | None, title: str) -> str:
+        if not self._memory_enabled:
+            return ""
+        try:
+            return self._memory.render(umo=umo, n=3)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _remember_session(self, session) -> None:
+        if not self._memory_enabled or session is None:
+            return
+        comments = [
+            comment.text
+            for comment in session.comments
+            if comment.kind in ("ambient", "chat", "intro")
+        ][-4:]
+        user_lines = [comment.text for comment in session.comments if comment.kind == "user"][-3:]
+        if not comments and not user_lines:
+            return
+        entry = {
+            "ts": time.time(),
+            "title": session.title,
+            "umo": session.umo or "",
+            "position": round(session.position, 1),
+            "comments": comments,
+            "user_lines": user_lines,
+        }
+        try:
+            self._memory.add(entry)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[watch-together] 写入本地观影记忆失败：{exc}")
+        text = (
+            f"和用户一起看了《{session.title}》"
+            f"（看到 {format_timestamp(session.position, True)}）。"
+        )
+        if comments:
+            text += "我说过：" + "；".join(comments[-2:]) + "。"
+        if user_lines:
+            text += "用户说：" + "；".join(user_lines[-2:]) + "。"
+        try:
+            self._memory_bridge.remember(text, session.umo or "")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[watch-together] 记忆插件写入失败：{exc}")
 
     # ------------------------------------------------------------------ 服务
     def _submit(self, coro):
@@ -660,6 +768,8 @@ class WatchTogetherPlugin(Star):
             self.engine.close_all()
         with contextlib.suppress(Exception):
             self._media_server.stop()
+        with contextlib.suppress(Exception):
+            self._watcher.stop()
         stop_server(self._server)
         self._server = None
         self._thread = None

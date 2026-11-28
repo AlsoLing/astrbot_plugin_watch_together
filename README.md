@@ -13,6 +13,10 @@
 
 - 🎬 **片库点播**：扫描 NAS 上的电影目录，网页里点一下就开始放（mp4 / webm 原生支持）。
 - ☁️ **媒体服务器直连**：可连 Jellyfin / Emby，直接读它的片单、海报、简介和字幕。
+- 🎞 **内嵌字幕**：MKV/MP4 里封装的字幕轨用 ffmpeg 自动提取，不用再找外挂字幕。
+- 📡 **局域网播放识别**：轮询 Jellyfin/Emby 的「正在播放」或 VLC Web 界面，自动跟着进度点评。
+- 🧠 **长期记忆**：看完自动记一笔（片名、进度、聊过的话），下次开场白会带上；
+  还能写进记忆插件（默认适配 `astrbot_plugin_sugarmemory_clean`）或 webhook。
 - 🧠 **AI 真的在"看"**：把刚刚的台词（SRT / ASS / VTT 自动解析）和播放进度交给模型；
   开启画面理解后每 20 秒截一帧低清画面，让它点评镜头、表情、构图。
 - 💬 **字幕式弹幕**：点评像字幕一样浮在画面下方，同时记在右侧「观影笔记」里，点时间戳就能跳回。
@@ -28,7 +32,7 @@
 ┌───────────── NAS ─────────────┐          ┌──────── 你的电脑 ────────┐
 │ AstrBot + 本插件               │          │ 浏览器打开观影室          │
 │  ├─ 片库扫描 / 字幕解析         │  影片流  │  <video> 播放             │
-│  ├─ HTTP 观影室 :6199  ◄───────┼──────────┤  每 2 秒上报进度          │
+│  ├─ HTTP 观影室 :6116  ◄───────┼──────────┤  每 2 秒上报进度          │
 │  └─ 每 N 秒：字幕片段 + 截图     │  进度    │  截图 / 说话              │
 │         ↓                      │ ────────►│                          │
 │     大模型 → 一句点评 ──────────┼──────────┤  弹幕 + 笔记 + 推送到聊天 │
@@ -74,7 +78,7 @@ astrbot_plugin_watch_together/
 | --- | --- |
 | `media_dirs` | **常用**。电影目录，填 **AstrBot 容器/主机内** 的真实路径，可填多个。 |
 | `provider_id` | 使用的聊天模型；想让它"看画面"，选支持视觉的模型（GPT-4o、Gemini、Qwen-VL 等）。 |
-| `server_port` | 观影室端口，默认 `6199`，Docker 记得 `-p 6199:6199`。 |
+| `server_port` | 观影室端口，默认 `6116`，Docker 记得 `-p 6116:6116`。 |
 | `public_host` | 留空自动探测 NAS 局域网 IP。Docker 桥接网络探测到的是容器 IP，电脑打不开时手填 NAS 的 IP。 |
 | `comment_interval` | 点评间隔，默认 90 秒。 |
 | `vision_enabled` | 是否允许截图给模型看。 |
@@ -87,6 +91,14 @@ astrbot_plugin_watch_together/
 | `media_server_username` / `media_server_password` | 没有 API Key 时用账号密码登录（Emby / 绿联媒体服务器通常只给账号密码）。 |
 | `media_server_path_map` | 媒体服务器路径 → 容器路径，例如 `/volume1/影视中心:/media`。 |
 | `media_server_refresh` | 片单刷新间隔，默认 300 秒。 |
+| `embedded_subtitles` | 是否提取内嵌字幕（需要 ffmpeg/ffprobe），默认开。 |
+| `auto_watch_enabled` | 自动识别局域网播放（Jellyfin/Emby 会话、VLC），默认关。 |
+| `auto_watch_interval` | 播放检测间隔，默认 10 秒。 |
+| `auto_watch_umo` | 自动识别时把点评推到哪个会话（可选）。 |
+| `vlc_url` | VLC Web 界面地址，例如 `http://192.168.1.20:8080`。 |
+| `memory_enabled` | 长期记忆开关，默认开。 |
+| `memory_plugin` | 要适配的记忆插件名，默认 `astrbot_plugin_sugarmemory_clean`。 |
+| `memory_webhook` | 可选，把观影摘要 POST 到外部地址。 |
 
 ### Docker 挂载
 
@@ -98,7 +110,7 @@ services:
     image: soulter/astrbot:latest
     ports:
       - "6185:6185"      # WebUI
-      - "6199:6199"      # 观影室
+      - "6116:6116"      # 观影室
     volumes:
       - ./data:/AstrBot/data
       - /volume1/video:/media   # 电影目录
@@ -120,8 +132,8 @@ services:
 /观影 停止             # 结束
 ```
 
-机器人会回一个地址，例如 `http://192.168.1.10:6199/?s=3f1a2b9c8d7e`，
-在电脑浏览器打开就能看。也可以直接打开 `http://192.168.1.10:6199/`，在片库里点。
+机器人会回一个地址，例如 `http://192.168.1.10:6116/?s=3f1a2b9c8d7e`，
+在电脑浏览器打开就能看。也可以直接打开 `http://192.168.1.10:6116/`，在片库里点。
 
 ### WebUI 页面
 
@@ -177,12 +189,56 @@ AI 的点评、字幕、聊天功能都一样，只是没有海报墙。
 
 ---
 
+## 内嵌字幕
+
+很多 MKV/MP4 把字幕作为轨道封装在文件里。插件找不到外挂字幕时，会用 ffmpeg：
+
+1. `ffprobe` 列出字幕流（语言、编码、默认/forced）；
+2. 优先中文、非 forced、文本编码；
+3. `ffmpeg -map 0:<index> -c:s srt` 转成 SRT，喂给 AI，同时给播放器做字幕轨。
+
+前提：能找到 `ffmpeg`（`ffmpeg_path`），并且 `embedded_subtitles` 打开。
+**位图字幕（PGS / VobSub）不能转文本**，会跳过——这种只能靠「画面理解」或外挂字幕。
+
+## 局域网自动识别
+
+插件在 NAS 上，看不到电脑播放器的进度。能自动识别的只有两类：
+
+1. **Jellyfin / Emby**：服务器知道每个客户端的正在播放内容和进度。配置好媒体服务器后打开
+   `auto_watch_enabled`，任何客户端（电视、手机、电脑）播放时插件会自动建一场、跟着进度点评；
+   `auto_watch_umo` 可以指定把点评推到哪个聊天。
+2. **VLC**：电脑上的 VLC 打开「工具 → 偏好设置 → 主界面 → Web」，设置密码和端口（默认 8080），
+   然后填 `vlc_url`（有密码写 `http://user:pass@192.168.1.20:8080`）。
+
+**PotPlayer、系统自带播放器、MPV 默认没有网络接口，插件识别不到**——这类请用网页里的
+「用外部播放器」手动同步（或者换 VLC / Jellyfin）。
+
+## 长期记忆
+
+默认开启，数据存在插件数据目录的 `watch_memory.json`，只记录：
+
+- 片名、看到的时间点；
+- AI 说过的最后两句、你说过的最后两句；
+- 时间与会话标识。
+
+下次开场白和聊天时会把最近 3 条带进提示词（"你们之前一起看过…"）。
+
+**适配记忆插件**：如果 `astrbot_plugin_sugarmemory_clean` 这类插件在运行时暴露了
+`add_memory / save_memory / store_memory / remember` 之类的方法，插件会把观影摘要写进去。
+启动日志会打印 `[watch-together] 记忆插件接口：[...]`；如果显示"未发现"，说明接口名不同，
+把那一行日志或插件代码发我，我再按实际接口适配。
+
+也可以用 `memory_webhook`：填一个 URL，插件会把
+`{"content": "...", "umo": "...", "source": "watch_together"}` POST 过去，方便接自建服务。
+
+---
+
 ## 常见问题
 
 ### 浏览器打不开观影室？
 
 1. 看日志里有没有 `[watch-together] 观影室已启动：...`；
-2. 检查防火墙 / Docker 端口映射（`-p 6199:6199`）；
+2. 检查防火墙 / Docker 端口映射（`-p 6116:6116`）；
 3. 电脑和 NAS 要在同一局域网，用返回的 IP，不要用 `127.0.0.1`；
 4. 返回 `172.17.x.x` 这类容器地址时，在配置里把 `public_host` 填成 NAS 的局域网 IP；
 5. 端口被占用就换 `server_port`。
@@ -218,6 +274,32 @@ AI 的点评、字幕、聊天功能都一样，只是没有海报墙。
 或同目录 `Subs/`、`字幕/` 子文件夹。中文编码（GBK/GB18030）会自动识别。
 媒体服务器片源如果本地路径不可读，会尝试从服务器下载字幕流；本地文件模式可以手动「加载字幕」。
 
+**内嵌字幕**需要 ffmpeg/ffprobe：
+
+```bash
+ffmpeg -version && ffprobe -version
+```
+
+装好后把 `embedded_subtitles` 保持开启即可；位图字幕（PGS）无解，只能开画面理解。
+
+### 为什么识别不到我的播放器？
+
+自动识别只支持有网络接口的播放源：
+
+- Jellyfin / Emby / 绿联等媒体服务器客户端（走 `/Sessions`）；
+- VLC（Web 界面）。
+
+PotPlayer、Windows 自带播放器、MP4 双击打开这类没有接口，插件拿不到进度，
+只能用网页里的「用外部播放器」手动点「开始同步」。
+
+### 记忆插件没生效？
+
+看启动日志里的 `[watch-together] 记忆插件接口：[...]`：
+
+- 有内容：说明已经找到保存方法，看完一场就会写入；
+- `未发现`：说明插件的保存方法名不在 `add_memory / save_memory / store_memory / remember` 里，
+  把它 `main.py` 里保存记忆的函数名发我，或先用 `memory_webhook` 兜底。
+
 ### 会不会剧透？
 
 提示词明确要求只看已播内容、不剧透，但模型偶尔仍会联想。
@@ -232,4 +314,4 @@ AI 的点评、字幕、聊天功能都一样，只是没有海报墙。
 
 ## 许可
 
-MIT。基于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 插件接口编写。
+MIT。作者 **AlsoLing**，基于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 插件接口编写。
